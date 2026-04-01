@@ -8,7 +8,7 @@ except KeyError as e:
     st.error(f"Missing secret: {e}")
     st.stop()
 
-st.set_page_config(page_title="Context7 Doc Chat", page_icon="📚")
+st.set_page_config(page_title="Chat With Our Docs", page_icon="❤️")
 
 def run_conversation(user_query: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
