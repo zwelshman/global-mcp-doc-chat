@@ -4,79 +4,82 @@ import anthropic
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-# 1. Configuration - Your Specific MCP Servers
+# --- 1. Configuration & Secrets ---
+# These must be set in the Streamlit Cloud Dashboard under Settings > Secrets
+try:
+    ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
+except KeyError:
+    st.error("Missing 'ANTHROPIC_API_KEY' in Streamlit Secrets!")
+    st.stop()
+
+# Your specific MCP HTTP/SSE endpoints
 MCP_CONFIG = {
     "hdsdocs": "https://gitmcp.io",
     "standard_pipeline": "https://gitmcp.io",
     "dbplyrdocs": "https://gitmcp.io"
 }
 
-st.set_page_config(page_title="Multi-Repo MCP Assistant", layout="wide")
+st.set_page_config(page_title="Multi-Repo MCP Hub", page_icon="🔗")
 
-# 2. Sidebar for API Keys (Or use st.secrets for Cloud Deployment)
-with st.sidebar:
-    st.title("Settings")
-    anthropic_key = st.text_input("Anthropic API Key", type="password")
-    st.info("On Streamlit Cloud, add 'ANTHROPIC_API_KEY' to your Secrets.")
-
-# 3. Helper to connect to SSE Servers and fetch tools
-async def get_tools_from_servers():
+# --- 2. MCP Tool Fetcher ---
+async def get_remote_mcp_tools():
+    """Connects to all gitmcp.io servers and aggregates their tool definitions."""
     all_tools = []
     for name, url in MCP_CONFIG.items():
         try:
-            # Connect to remote gitmcp.io servers
+            # gitmcp.io uses SSE (Server-Sent Events) for transport
             async with sse_client(url) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools = await session.list_tools()
-                    # We tag tools with their origin for clarity
-                    all_tools.extend(tools)
+                    # Add server metadata to tool names to prevent collisions
+                    for tool in tools:
+                        tool.name = f"{name}_{tool.name}"
+                        all_tools.append(tool)
         except Exception as e:
-            st.error(f"Error connecting to {name}: {e}")
+            st.sidebar.warning(f"Could not reach {name}: {str(e)}")
     return all_tools
 
-# 4. Main Chat Logic
-async def handle_chat(user_query):
-    client = anthropic.Anthropic(api_key=anthropic_key)
+# --- 3. Chat Logic ---
+async def run_conversation(user_query):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     
-    # Prepend Context7 'Neutral' command
-    enhanced_prompt = f"use context7. {user_query}"
+    # Prepend Context7 'library-neutral' instruction
+    # This tells the model to also use Context7's global index
+    global_prompt = f"use context7. {user_query}"
     
-    # Fetch tools from your 3 specific servers
-    available_tools = await get_tools_from_servers()
+    # Fetch tools from your 3 specific gitmcp servers
+    # Note: For full tool execution, you'd implement a loop here to handle tool_use
+    remote_tools = await get_remote_mcp_tools()
     
-    # Call Claude (Note: tool_use requires a loop in a full implementation)
     response = client.messages.create(
         model="claude-3-5-sonnet-20241022",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": enhanced_prompt}]
-        # tools=available_tools  # Uncomment when tool-handling loop is ready
+        max_tokens=1024,
+        messages=[{"role": "user", "content": global_prompt}]
+        # tools=remote_tools # Requires a loop to execute the tool results
     )
     return response.content[0].text
 
-# --- UI INTERFACE ---
-st.title("🔍 Multi-Repo Documentation Assistant")
-st.markdown(f"**Connected to:** `{', '.join(MCP_CONFIG.keys())}` + **Context7 Global Search**")
+# --- 4. Streamlit UI ---
+st.title("🌐 Multi-Repo MCP Assistant")
+st.info(f"Connected to: {', '.join(MCP_CONFIG.keys())} + Context7 Global")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display history
+# Display Chat History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User Input
+# Handle Input
 if prompt := st.chat_input("Ask about your pipelines or any public library..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    if not anthropic_key:
-        st.warning("Please enter your Anthropic API Key in the sidebar.")
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("Querying MCP servers and Context7..."):
-                response_text = asyncio.run(handle_chat(prompt))
-                st.markdown(response_text)
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
+    with st.chat_message("assistant"):
+        with st.spinner("Searching docs..."):
+            answer = asyncio.run(run_conversation(prompt))
+            st.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
