@@ -2,66 +2,44 @@ import streamlit as st
 import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-import anthropic # Using Anthropic as the LLM orchestrator
+import anthropic
 
-st.set_page_config(page_title="MCP Multi-Server Hub")
+st.title("🤖 Cloud MCP Assistant")
 
-# --- SIDEBAR CONFIGURATION ---
-with st.sidebar:
-    st.title("Settings")
-    anthropic_key = st.text_input("Anthropic API Key", type="password")
-    github_token = st.text_input("GitHub Token (for GitHub MCP)", type="password")
-    # For Context7, we use the library-neutral prompt prefix method
-    context7_key = st.text_input("Context7 API Key", type="password")
+# Use st.secrets for production security
+# Setup these in the Streamlit Cloud Dashboard under 'Settings > Secrets'
+try:
+    ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
+    GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+    CONTEXT7_KEY = st.secrets["CONTEXT7_API_KEY"]
+except KeyError:
+    st.error("Missing Secrets! Add them in the Streamlit Cloud Dashboard.")
+    st.stop()
 
-# --- CORE MCP LOGIC ---
-async def query_mcp_hub(user_prompt):
-    # Define the GitHub MCP Server (runs via npx)
+async def run_mcp_query(user_prompt):
+    # npx is now available because of packages.txt
     github_params = StdioServerParameters(
         command="npx",
         args=["-y", "@modelcontextprotocol/server-github"],
-        env={"GITHUB_PERSONAL_ACCESS_TOKEN": github_token}
+        env={"GITHUB_PERSONAL_ACCESS_TOKEN": GITHUB_TOKEN}
     )
 
     async with stdio_client(github_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             
-            # Fetch tools available from GitHub MCP
-            tools = await session.list_tools()
-            
-            # Orchestrate with LLM
-            client = anthropic.Anthropic(api_key=anthropic_key)
-            
-            # Inject Context7 "Global Mode" into the prompt
-            final_prompt = f"use context7. {user_prompt}"
-            
+            # Prefix with 'use context7' for neutral library search
+            client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
             response = client.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=1024,
-                messages=[{"role": "user", "content": final_prompt}]
-                # In a full app, you would pass 'tools' here for the LLM to call
+                messages=[{"role": "user", "content": f"use context7. {user_prompt}"}]
             )
             return response.content[0].text
 
-# --- UI INTERFACE ---
-st.title("🤖 MCP Multi-Repo Assistant")
-st.caption("Combining Context7 documentation with your specific MCP servers.")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
-
-if prompt := st.chat_input("Ask a cross-repo question..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# --- Simple Chat UI ---
+if prompt := st.chat_input("Ask anything..."):
     st.chat_message("user").write(prompt)
-
-    if not (anthropic_key and github_token):
-        st.error("Please provide your API keys in the sidebar.")
-    else:
-        with st.spinner("Consulting MCP Servers..."):
-            answer = asyncio.run(query_mcp_hub(prompt))
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            st.chat_message("assistant").write(answer)
+    with st.spinner("Connecting to MCP..."):
+        answer = asyncio.run(run_mcp_query(prompt))
+        st.chat_message("assistant").write(answer)
