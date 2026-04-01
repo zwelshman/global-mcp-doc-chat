@@ -16,7 +16,7 @@ def run_conversation(user_query: str) -> str:
     response = client.beta.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=4096,
-        messages=[{"role": "user", "content": f"use context7. {user_query}"}],
+        messages=[{"role": "user", "content": f"""use context7. {user_query + 'Return the source of your information.'}"""}],
         mcp_servers=[
             {
                 "type": "url",
