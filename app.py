@@ -53,7 +53,7 @@ async def run_conversation(user_query):
     remote_tools = await get_remote_mcp_tools()
     
     response = client.messages.create(
-        model="claude-3-5-sonnet-latest",
+        model="claude-haiku-4-5",
         max_tokens=1024,
         messages=[{"role": "user", "content": global_prompt}],
         tools=remote_tools # Requires a loop to execute the tool results
