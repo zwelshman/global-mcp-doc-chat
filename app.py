@@ -32,7 +32,7 @@ def run_conversation(user_query: str) -> str:
     return "\n".join(text_parts) if text_parts else "(no response)"
 
 
-st.title("📚 Context7 Doc Assistant")
+st.title("❤️ Chat With Our Docs")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
