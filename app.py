@@ -25,17 +25,18 @@ async def connect_mcp(name: str, url: str) -> list:
     """Connect to one MCP server and return its tools, or [] on failure."""
     tools = []
     try:
-        async with streamable_http_client(url) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.list_tools()
-                for t in result.tools:
-                    t.name = f"{name}_{t.name}"
-                    tools.append(t)
-    except* Exception as eg:          # ✅ catches ExceptionGroup from TaskGroup
-        for exc in eg.exceptions:
-            st.sidebar.warning(f"Could not reach **{name}**: {type(exc).__name__}: {exc}")
-    except Exception as e:            # plain exceptions (non-TaskGroup)
+        try:
+            async with streamable_http_client(url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    for t in result.tools:
+                        t.name = f"{name}_{t.name}"
+                        tools.append(t)
+        except* Exception as eg:          # ✅ catches ExceptionGroup from TaskGroup
+            for exc in eg.exceptions:
+                st.sidebar.warning(f"Could not reach **{name}**: {type(exc).__name__}: {exc}")
+    except Exception as e:                # ✅ catches plain exceptions (outer try)
         st.sidebar.warning(f"Could not reach **{name}**: {type(e).__name__}: {e}")
     return tools
 
