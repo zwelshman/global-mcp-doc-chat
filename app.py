@@ -41,7 +41,9 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask about any library..."):
+if prompt := st.chat_input("""
+In BHF Documenation what is the latest batch of data? 
+Or In the BHF standard pipeline what is the script that selects the lsoa closest to an index date?"""):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
