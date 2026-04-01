@@ -3,8 +3,9 @@ import anthropic
 
 try:
     ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
-except KeyError:
-    st.error("Missing 'ANTHROPIC_API_KEY' in Streamlit Secrets!")
+    CONTEXT7_KEY = st.secrets["CONTEXT7_API_KEY"]
+except KeyError as e:
+    st.error(f"Missing secret: {e}")
     st.stop()
 
 st.set_page_config(page_title="Context7 Doc Chat", page_icon="📚")
@@ -21,6 +22,7 @@ def run_conversation(user_query: str) -> str:
                 "type": "url",
                 "url": "https://mcp.context7.com/mcp",
                 "name": "context7",
+                "authorization_token": CONTEXT7_KEY,  # ✅ API key passed here
             }
         ],
         betas=["mcp-client-2025-04-04"],
