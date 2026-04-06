@@ -98,6 +98,8 @@ if "active_shortnames" not in st.session_state:
     }
 if "custom_servers" not in st.session_state:
     st.session_state.custom_servers = []
+if "custom_mcp_servers" not in st.session_state:
+    st.session_state.custom_mcp_servers = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "connection_status" not in st.session_state:
@@ -226,9 +228,9 @@ async def run_conversation(user_query, mcp_config, status):
                 return ("\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason), input_tokens, output_tokens
 
 
-st.set_page_config(page_title="GitMCP Doc Assistant", layout="wide")
-st.title("GitMCP Doc Assistant")
-st.caption("Query GitHub-hosted documentation via gitmcp.io. Only gitmcp.io servers are permitted.")
+st.set_page_config(page_title="MCP Doc Assistant", layout="wide")
+st.title("MCP Doc Assistant")
+st.caption("Query GitHub-hosted documentation via gitmcp.io, or connect any custom HTTP MCP server.")
 st.info("Note: this app is single-turn. Each message is sent independently with no memory of previous messages. Clear chat history before starting a new topic for best results.")
 
 with st.sidebar:
@@ -298,6 +300,26 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.subheader("Custom MCP server")
+    st.caption("Connect any HTTP/HTTPS MCP server (e.g. Supabase, custom APIs).")
+
+    custom_mcp_to_keep = []
+    for i, cs in enumerate(st.session_state.custom_mcp_servers):
+        c1, c2, c3 = st.columns([2, 4, 1])
+        new_name = c1.text_input("Name", value=cs["shortname"], key="mcpname_" + str(i),
+                                  label_visibility="collapsed", placeholder="shortname")
+        new_url  = c2.text_input("URL",  value=cs["url"],       key="mcpurl_"  + str(i),
+                                  label_visibility="collapsed", placeholder="https://...")
+        remove = c3.button("X", key="mcpdel_" + str(i))
+        if not remove:
+            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url})
+    st.session_state.custom_mcp_servers = custom_mcp_to_keep
+
+    if st.button("Add custom MCP"):
+        st.session_state.custom_mcp_servers.append({"shortname": "", "url": ""})
+        st.rerun()
+
+    st.divider()
     errors = []
     mcp_config = {}
     seen_names = set()
@@ -327,6 +349,26 @@ with st.sidebar:
             continue
         seen_names.add(name)
         mcp_config[name] = resolved
+
+    for cs in st.session_state.custom_mcp_servers:
+        name = cs["shortname"].strip()
+        url  = cs["url"].strip()
+        if not name and not url:
+            continue
+        if not name:
+            errors.append("A custom MCP server is missing a short name.")
+            continue
+        if not re.match(r"^[A-Za-z0-9_]+$", name):
+            errors.append(name + ": use only letters, digits, underscores.")
+            continue
+        if name in seen_names:
+            errors.append("Duplicate short name: " + name)
+            continue
+        if not url.startswith("https://"):
+            errors.append(name + ": URL must start with https://")
+            continue
+        seen_names.add(name)
+        mcp_config[name] = url
 
     for e in errors:
         st.warning(e)
