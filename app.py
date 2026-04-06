@@ -112,21 +112,28 @@ if "total_output_tokens" not in st.session_state:
 
 async def probe_servers(mcp_config):
     results = {}
-    async with AsyncExitStack() as stack:
-        for name, url in mcp_config.items():
-            try:
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                tool_list = await session.list_tools()
-                tools = tool_list.tools
-                version = None
-                for t in tools:
-                    version = extract_version_from_description(t.description or "")
-                    if version:
-                        break
-                results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
-            except Exception as e:
+    try:
+        async with AsyncExitStack() as stack:
+            for name, url in mcp_config.items():
+                try:
+                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    tool_list = await session.list_tools()
+                    tools = tool_list.tools
+                    version = None
+                    for t in tools:
+                        version = extract_version_from_description(t.description or "")
+                        if version:
+                            break
+                    results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
+                except Exception as e:
+                    results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        for name in mcp_config:
+            if name not in results:
                 results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
     return results
 
@@ -138,94 +145,114 @@ async def run_conversation(user_query, mcp_config, status):
     input_tokens  = 0
     output_tokens = 0
 
-    async with AsyncExitStack() as stack:
-        for name, url in mcp_config.items():
-            status.update(label="Connecting to " + name + "...")
-            try:
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                result = await session.list_tools()
-                for t in result.tools:
-                    prefixed = name + "_" + t.name
-                    tool_registry[prefixed] = (session, t.name)
-                    anthropic_tools.append({
-                        "name": prefixed,
-                        "description": t.description or "",
-                        "input_schema": t.inputSchema,
-                    })
-                status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
-            except Exception as e:
-                status.write("Unreachable: " + name + " - " + str(e))
+    result_holder = [None]
+    try:
+        async with AsyncExitStack() as stack:
+            for name, url in mcp_config.items():
+                status.update(label="Connecting to " + name + "...")
+                try:
+                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    result = await session.list_tools()
+                    for t in result.tools:
+                        prefixed = name + "_" + t.name
+                        tool_registry[prefixed] = (session, t.name)
+                        anthropic_tools.append({
+                            "name": prefixed,
+                            "description": t.description or "",
+                            "input_schema": t.inputSchema,
+                        })
+                    status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
+                except Exception as e:
+                    status.write("Unreachable: " + name + " - " + str(e))
 
-        if not tool_registry:
-            return "No MCP servers could be reached.", 0, 0
+            if not tool_registry:
+                return "No MCP servers could be reached.", 0, 0
 
-        status.write("Tools available: " + ", ".join(tool_registry.keys()))
-        messages = [{"role": "user", "content": user_query}]
-        turn = 0
+            status.write("Tools available: " + ", ".join(tool_registry.keys()))
+            messages = [{"role": "user", "content": user_query}]
+            turn = 0
 
-        while True:
-            turn += 1
-            status.update(label="Thinking... (turn " + str(turn) + ")")
-            try:
-                response = client.messages.create(
-                    model="claude-haiku-4-5",
-                    max_tokens=4096,
-                    tools=anthropic_tools,
-                    messages=messages,
-                )
-            except anthropic.RateLimitError:
-                status.update(label="Rate limit hit", state="error", expanded=False)
-                return (
-                    "Rate limit reached. You have exceeded the API quota for this minute. "
-                    "Please wait 60 seconds and try again. If this keeps happening, "
-                    "try reducing the number of active servers or shortening your query."
-                ), input_tokens, output_tokens
+            while True:
+                turn += 1
+                status.update(label="Thinking... (turn " + str(turn) + ")")
+                try:
+                    response = client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=4096,
+                        tools=anthropic_tools,
+                        messages=messages,
+                    )
+                except anthropic.RateLimitError:
+                    status.update(label="Rate limit hit", state="error", expanded=False)
+                    result_holder[0] = (
+                        "Rate limit reached. You have exceeded the API quota for this minute. "
+                        "Please wait 60 seconds and try again. If this keeps happening, "
+                        "try reducing the number of active servers or shortening your query.",
+                        input_tokens, output_tokens,
+                    )
+                    break
 
-            input_tokens  += response.usage.input_tokens
-            output_tokens += response.usage.output_tokens
-            text_parts = [b.text for b in response.content if b.type == "text"]
+                input_tokens  += response.usage.input_tokens
+                output_tokens += response.usage.output_tokens
+                text_parts = [b.text for b in response.content if b.type == "text"]
 
-            if response.stop_reason == "end_turn":
-                status.update(label="Done", state="complete", expanded=False)
-                return "\n".join(text_parts) if text_parts else "(no response)", input_tokens, output_tokens
+                if response.stop_reason == "end_turn":
+                    status.update(label="Done", state="complete", expanded=False)
+                    result_holder[0] = (
+                        "\n".join(text_parts) if text_parts else "(no response)",
+                        input_tokens, output_tokens,
+                    )
+                    break
 
-            if response.stop_reason == "tool_use":
-                messages.append({"role": "assistant", "content": response.content})
-                if text_parts:
-                    status.write("Reasoning: " + " ".join(text_parts))
-                tool_results = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
-                    status.update(label="Calling " + block.name + "...")
-                    with status.container():
-                        with st.expander("Tool: " + block.name, expanded=False):
-                            st.json(block.input)
-                    if block.name not in tool_registry:
-                        result_text = "Unknown tool: " + block.name
-                    else:
-                        session, orig_name = tool_registry[block.name]
-                        try:
-                            call_result = await session.call_tool(orig_name, block.input)
-                            result_text = "\n".join(
-                                c.text for c in call_result.content if hasattr(c, "text")
-                            ) or "(empty result)"
-                            preview = result_text[:300] + "..." if len(result_text) > 300 else result_text
-                            status.write(block.name + " returned: " + preview)
-                        except Exception as e:
-                            result_text = "Tool error: " + str(e)
-                            status.write(block.name + " error: " + str(e))
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_text,
-                    })
-                messages.append({"role": "user", "content": tool_results})
-            else:
-                status.update(label="Unexpected stop: " + response.stop_reason, state="error")
-                return ("\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason), input_tokens, output_tokens
+                if response.stop_reason == "tool_use":
+                    messages.append({"role": "assistant", "content": response.content})
+                    if text_parts:
+                        status.write("Reasoning: " + " ".join(text_parts))
+                    tool_results = []
+                    for block in response.content:
+                        if block.type != "tool_use":
+                            continue
+                        status.update(label="Calling " + block.name + "...")
+                        with status.container():
+                            with st.expander("Tool: " + block.name, expanded=False):
+                                st.json(block.input)
+                        if block.name not in tool_registry:
+                            result_text = "Unknown tool: " + block.name
+                        else:
+                            session, orig_name = tool_registry[block.name]
+                            try:
+                                call_result = await session.call_tool(orig_name, block.input)
+                                result_text = "\n".join(
+                                    c.text for c in call_result.content if hasattr(c, "text")
+                                ) or "(empty result)"
+                                preview = result_text[:300] + "..." if len(result_text) > 300 else result_text
+                                status.write(block.name + " returned: " + preview)
+                            except Exception as e:
+                                result_text = "Tool error: " + str(e)
+                                status.write(block.name + " error: " + str(e))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_text,
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    status.update(label="Unexpected stop: " + response.stop_reason, state="error")
+                    result_holder[0] = (
+                        "\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason,
+                        input_tokens, output_tokens,
+                    )
+                    break
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        if result_holder[0] is None:
+            status.update(label="Connection error", state="error", expanded=False)
+            result_holder[0] = ("MCP connection error: " + str(e), input_tokens, output_tokens)
+
+    return result_holder[0] if result_holder[0] is not None else ("(no response)", input_tokens, output_tokens)
 
 
 st.set_page_config(page_title="MCP Doc Assistant", layout="wide")
