@@ -15,8 +15,8 @@ except KeyError:
 GITMCP_BASE = "https://gitmcp.io/"
 
 # Pricing for claude-sonnet-4-5 (USD per million tokens)
-INPUT_COST_PER_M  = 3.00
-OUTPUT_COST_PER_M = 15.00
+INPUT_COST_PER_M  = 1.00
+OUTPUT_COST_PER_M = 5.00
 LIBRARY_CATALOGUE = [
     {"shortname": "bhf_docs",     "github": "BHFDSC/documentation",     "lang": "Python", "desc": "BHF DSC data curation documentation", "default": True},
     {"shortname": "bhf_pyspark_standard_pipeline",     "github": "BHFDSC/standard-pipeline", "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline", "default": True},
@@ -181,7 +181,7 @@ async def run_conversation(user_query, mcp_config, status):
             turn += 1
             status.update(label="Thinking... (turn " + str(turn) + ")")
             response = client.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-haiku-4-5",
                 max_tokens=4096,
                 tools=anthropic_tools,
                 messages=messages,
@@ -337,7 +337,7 @@ with st.sidebar:
     c1, c2 = st.columns(2)
     c1.metric("Input tokens",  "{:,}".format(st.session_state.total_input_tokens))
     c2.metric("Output tokens", "{:,}".format(st.session_state.total_output_tokens))
-    st.caption("Pricing: $3 / $15 per 1M tokens (claude-sonnet-4-5)")
+    st.caption("Pricing: $1 / $5 per 1M tokens (claude-haiku-4-5)")
 
     st.divider()
     if st.button("Clear chat history"):
