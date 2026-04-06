@@ -17,8 +17,10 @@ GITMCP_BASE = "https://gitmcp.io/"
 # Pricing for claude-sonnet-4-5 (USD per million tokens)
 INPUT_COST_PER_M  = 3.00
 OUTPUT_COST_PER_M = 15.00
-
 LIBRARY_CATALOGUE = [
+    {"shortname": "bhfdocs",     "github": "BHFDSC/documentation",     "lang": "Python", "desc": "BHF DSC data curation documentation", "default": True},
+    {"shortname": "bhfdocs",     "github": "BHFDSC/standard-pipeline", "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline", "default": True},
+    {"shortname": "bhf_ckd_phenotype", "github": "BHFDSC/hds_phenotypes_ckd", "lang": "Python", "desc": "BHF HDS DSC chronoic kidney disease phenotype", "default": True},
     {"shortname": "pandas",      "github": "pandas-dev/pandas",        "lang": "Python", "desc": "Data structures & analysis",     "default": False},
     {"shortname": "numpy",       "github": "numpy/numpy",               "lang": "Python", "desc": "Scientific computing",           "default": False},
     {"shortname": "sklearn",     "github": "scikit-learn/scikit-learn", "lang": "Python", "desc": "Machine learning",               "default": False},
