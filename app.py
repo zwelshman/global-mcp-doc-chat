@@ -1,12 +1,20 @@
 import streamlit as st
 import asyncio
 import anthropic
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from contextlib import AsyncExitStack
 import re
 import json
 from datetime import datetime
+
+
+def unwrap_exc(e):
+    """Return a readable message, unwrapping BaseExceptionGroup if needed."""
+    if hasattr(e, "exceptions") and e.exceptions:
+        return "; ".join(unwrap_exc(sub) for sub in e.exceptions)
+    return str(e)
 
 try:
     ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
@@ -110,13 +118,21 @@ if "total_output_tokens" not in st.session_state:
     st.session_state.total_output_tokens = 0
 
 
-async def probe_servers(mcp_config):
+async def probe_servers(mcp_config, mcp_headers=None):
+    if mcp_headers is None:
+        mcp_headers = {}
     results = {}
     try:
         async with AsyncExitStack() as stack:
             for name, url in mcp_config.items():
                 try:
-                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                    headers = mcp_headers.get(name)
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    ) if headers else None
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
                     session = await stack.enter_async_context(ClientSession(read, write))
                     await session.initialize()
                     tool_list = await session.list_tools()
@@ -128,17 +144,19 @@ async def probe_servers(mcp_config):
                             break
                     results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
                 except Exception as e:
-                    results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
+                    results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
             raise
         for name in mcp_config:
             if name not in results:
-                results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
+                results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
     return results
 
 
-async def run_conversation(user_query, mcp_config, status):
+async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
+    if mcp_headers is None:
+        mcp_headers = {}
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     tool_registry = {}
     anthropic_tools = []
@@ -151,7 +169,13 @@ async def run_conversation(user_query, mcp_config, status):
             for name, url in mcp_config.items():
                 status.update(label="Connecting to " + name + "...")
                 try:
-                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                    headers = mcp_headers.get(name)
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    ) if headers else None
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
                     session = await stack.enter_async_context(ClientSession(read, write))
                     await session.initialize()
                     result = await session.list_tools()
@@ -165,7 +189,7 @@ async def run_conversation(user_query, mcp_config, status):
                         })
                     status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
                 except Exception as e:
-                    status.write("Unreachable: " + name + " - " + str(e))
+                    status.write("Unreachable: " + name + " - " + unwrap_exc(e))
 
             if not tool_registry:
                 return "No MCP servers could be reached.", 0, 0
@@ -250,7 +274,7 @@ async def run_conversation(user_query, mcp_config, status):
             raise
         if result_holder[0] is None:
             status.update(label="Connection error", state="error", expanded=False)
-            result_holder[0] = ("MCP connection error: " + str(e), input_tokens, output_tokens)
+            result_holder[0] = ("MCP connection error: " + unwrap_exc(e), input_tokens, output_tokens)
 
     return result_holder[0] if result_holder[0] is not None else ("(no response)", input_tokens, output_tokens)
 
@@ -332,23 +356,27 @@ with st.sidebar:
 
     custom_mcp_to_keep = []
     for i, cs in enumerate(st.session_state.custom_mcp_servers):
-        c1, c2, c3 = st.columns([2, 4, 1])
-        new_name = c1.text_input("Name", value=cs["shortname"], key="mcpname_" + str(i),
-                                  label_visibility="collapsed", placeholder="shortname")
-        new_url  = c2.text_input("URL",  value=cs["url"],       key="mcpurl_"  + str(i),
-                                  label_visibility="collapsed", placeholder="https://...")
+        c1, c2, c3 = st.columns([2, 5, 1])
+        new_name  = c1.text_input("Name",  value=cs["shortname"],      key="mcpname_"  + str(i),
+                                   label_visibility="collapsed", placeholder="shortname")
+        new_url   = c2.text_input("URL",   value=cs["url"],            key="mcpurl_"   + str(i),
+                                   label_visibility="collapsed", placeholder="https://...")
         remove = c3.button("X", key="mcpdel_" + str(i))
+        new_token = st.text_input("Bearer token (optional)", value=cs.get("token", ""),
+                                   key="mcptoken_" + str(i), type="password",
+                                   placeholder="Leave blank if no auth required")
         if not remove:
-            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url})
+            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url, "token": new_token})
     st.session_state.custom_mcp_servers = custom_mcp_to_keep
 
     if st.button("Add custom MCP"):
-        st.session_state.custom_mcp_servers.append({"shortname": "", "url": ""})
+        st.session_state.custom_mcp_servers.append({"shortname": "", "url": "", "token": ""})
         st.rerun()
 
     st.divider()
     errors = []
     mcp_config = {}
+    mcp_headers = {}
     seen_names = set()
 
     for lib in LIBRARY_CATALOGUE:
@@ -396,6 +424,9 @@ with st.sidebar:
             continue
         seen_names.add(name)
         mcp_config[name] = url
+        token = cs.get("token", "").strip()
+        if token:
+            mcp_headers[name] = {"Authorization": "Bearer " + token}
 
     for e in errors:
         st.warning(e)
@@ -449,10 +480,10 @@ if not mcp_config:
     st.warning("Select at least one library from the sidebar to start chatting.")
     st.stop()
 
-prev_config_key = str(sorted(mcp_config.items()))
+prev_config_key = str(sorted(mcp_config.items())) + str(sorted(mcp_headers.items()))
 if st.session_state.connection_status.get("_config_key") != prev_config_key:
     with st.status("Probing servers...", expanded=True) as probe_status:
-        probe_results = asyncio.run(probe_servers(mcp_config))
+        probe_results = asyncio.run(probe_servers(mcp_config, mcp_headers))
         st.session_state.connection_status = probe_results
         st.session_state.connection_status["_config_key"] = prev_config_key
         probe_status.update(label="Server probe complete", state="complete", expanded=False)
@@ -503,7 +534,7 @@ if prompt := st.chat_input(placeholder):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.status("Starting...", expanded=True) as status:
-            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status))
+            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
         st.markdown(answer)
         msg_cost = calc_cost(in_tok, out_tok)
         st.caption(
