@@ -5,6 +5,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from contextlib import AsyncExitStack
 import re
+import json
+from datetime import datetime
 
 try:
     ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
@@ -13,34 +15,35 @@ except KeyError:
     st.stop()
 
 GITMCP_BASE = "https://gitmcp.io/"
+MAX_ACTIVE_SERVERS = 2
 
-# Pricing for claude-sonnet-4-5 (USD per million tokens)
 INPUT_COST_PER_M  = 1.00
 OUTPUT_COST_PER_M = 5.00
+
 LIBRARY_CATALOGUE = [
-    {"shortname": "bhf_docs",     "github": "BHFDSC/documentation",     "lang": "Python", "desc": "BHF DSC data curation documentation", "default": True},
-    {"shortname": "bhf_pyspark_standard_pipeline",     "github": "BHFDSC/standard-pipeline", "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline", "default": True},
-    {"shortname": "bhf_ckd_phenotype", "github": "BHFDSC/hds_phenotypes_ckd", "lang": "Python", "desc": "BHF HDS DSC chronoic kidney disease phenotype", "default": True},
-    {"shortname": "pandas",      "github": "pandas-dev/pandas",        "lang": "Python", "desc": "Data structures & analysis",     "default": False},
-    {"shortname": "numpy",       "github": "numpy/numpy",               "lang": "Python", "desc": "Scientific computing",           "default": False},
-    {"shortname": "sklearn",     "github": "scikit-learn/scikit-learn", "lang": "Python", "desc": "Machine learning",               "default": False},
-    {"shortname": "matplotlib",  "github": "matplotlib/matplotlib",     "lang": "Python", "desc": "Plotting & visualisation",       "default": False},
-    {"shortname": "seaborn",     "github": "mwaskom/seaborn",           "lang": "Python", "desc": "Statistical visualisation",      "default": False},
-    {"shortname": "scipy",       "github": "scipy/scipy",               "lang": "Python", "desc": "Scientific & engineering maths", "default": False},
-    {"shortname": "statsmodels", "github": "statsmodels/statsmodels",   "lang": "Python", "desc": "Statistical modelling & tests",  "default": False},
-    {"shortname": "pyspark",     "github": "apache/spark",              "lang": "Python", "desc": "Distributed data processing",    "default": True},
-    {"shortname": "polars",      "github": "pola-rs/polars",            "lang": "Python", "desc": "Fast DataFrames (Rust-backed)",  "default": False},
-    {"shortname": "pytorch",     "github": "pytorch/pytorch",           "lang": "Python", "desc": "Deep learning framework",        "default": False},
-    {"shortname": "xgboost",     "github": "dmlc/xgboost",             "lang": "Python", "desc": "Gradient boosting",              "default": False},
-    {"shortname": "lightgbm",    "github": "microsoft/LightGBM",        "lang": "Python", "desc": "Fast gradient boosting",         "default": False},
-    {"shortname": "dbplyr",      "github": "tidyverse/dbplyr",          "lang": "R",      "desc": "dplyr backend for databases",    "default": True},
-    {"shortname": "dplyr",       "github": "tidyverse/dplyr",           "lang": "R",      "desc": "Data manipulation grammar",      "default": False},
-    {"shortname": "ggplot2",     "github": "tidyverse/ggplot2",         "lang": "R",      "desc": "Grammar of graphics",            "default": False},
-    {"shortname": "tidyr",       "github": "tidyverse/tidyr",           "lang": "R",      "desc": "Tidy data reshaping",            "default": False},
-    {"shortname": "purrr",       "github": "tidyverse/purrr",           "lang": "R",      "desc": "Functional programming tools",   "default": False},
-    {"shortname": "caret",       "github": "topepo/caret",              "lang": "R",      "desc": "ML training & tuning",           "default": False},
-    {"shortname": "tidymodels",  "github": "tidymodels/tidymodels",     "lang": "R",      "desc": "Tidy modelling framework",       "default": False},
-    {"shortname": "data.table",  "github": "Rdatatable/data.table",     "lang": "R",      "desc": "Fast in-memory data wrangling",  "default": False},
+    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": True},
+    {"shortname": "bhf_pyspark_standard_pipeline", "github": "BHFDSC/standard-pipeline",   "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline",       "default": False},
+    {"shortname": "bhf_ckd_phenotype",          "github": "BHFDSC/hds_phenotypes_ckd",    "lang": "Python", "desc": "BHF HDS DSC chronic kidney disease phenotype",  "default": False},
+    {"shortname": "pandas",                     "github": "pandas-dev/pandas",             "lang": "Python", "desc": "Data structures & analysis",                   "default": False},
+    {"shortname": "numpy",                      "github": "numpy/numpy",                   "lang": "Python", "desc": "Scientific computing",                         "default": False},
+    {"shortname": "sklearn",                    "github": "scikit-learn/scikit-learn",     "lang": "Python", "desc": "Machine learning",                             "default": False},
+    {"shortname": "matplotlib",                 "github": "matplotlib/matplotlib",         "lang": "Python", "desc": "Plotting & visualisation",                     "default": False},
+    {"shortname": "seaborn",                    "github": "mwaskom/seaborn",               "lang": "Python", "desc": "Statistical visualisation",                    "default": False},
+    {"shortname": "scipy",                      "github": "scipy/scipy",                   "lang": "Python", "desc": "Scientific & engineering maths",               "default": False},
+    {"shortname": "statsmodels",                "github": "statsmodels/statsmodels",       "lang": "Python", "desc": "Statistical modelling & tests",                "default": False},
+    {"shortname": "pyspark",                    "github": "apache/spark",                  "lang": "Python", "desc": "Distributed data processing",                  "default": False},
+    {"shortname": "polars",                     "github": "pola-rs/polars",                "lang": "Python", "desc": "Fast DataFrames (Rust-backed)",               "default": False},
+    {"shortname": "pytorch",                    "github": "pytorch/pytorch",               "lang": "Python", "desc": "Deep learning framework",                      "default": False},
+    {"shortname": "xgboost",                    "github": "dmlc/xgboost",                 "lang": "Python", "desc": "Gradient boosting",                            "default": False},
+    {"shortname": "lightgbm",                   "github": "microsoft/LightGBM",            "lang": "Python", "desc": "Fast gradient boosting",                       "default": False},
+    {"shortname": "dbplyr",                     "github": "tidyverse/dbplyr",              "lang": "R",      "desc": "dplyr backend for databases",                  "default": False},
+    {"shortname": "dplyr",                      "github": "tidyverse/dplyr",               "lang": "R",      "desc": "Data manipulation grammar",                    "default": False},
+    {"shortname": "ggplot2",                    "github": "tidyverse/ggplot2",             "lang": "R",      "desc": "Grammar of graphics",                          "default": False},
+    {"shortname": "tidyr",                      "github": "tidyverse/tidyr",               "lang": "R",      "desc": "Tidy data reshaping",                          "default": False},
+    {"shortname": "purrr",                      "github": "tidyverse/purrr",               "lang": "R",      "desc": "Functional programming tools",                 "default": False},
+    {"shortname": "caret",                      "github": "topepo/caret",                  "lang": "R",      "desc": "ML training & tuning",                         "default": False},
+    {"shortname": "tidymodels",                 "github": "tidymodels/tidymodels",         "lang": "R",      "desc": "Tidy modelling framework",                     "default": False},
+    {"shortname": "data.table",                 "github": "Rdatatable/data.table",         "lang": "R",      "desc": "Fast in-memory data wrangling",               "default": False},
 ]
 
 LANG_LABEL = {"Python": "Python", "R": "R"}
@@ -70,7 +73,8 @@ def normalise_gitmcp_url(raw):
 
 
 def calc_cost(input_tokens, output_tokens):
-    return (input_tokens / 1_000_000 * INPUT_COST_PER_M + output_tokens / 1_000_000 * OUTPUT_COST_PER_M)
+    return (input_tokens / 1_000_000 * INPUT_COST_PER_M
+            + output_tokens / 1_000_000 * OUTPUT_COST_PER_M)
 
 
 def extract_version_from_description(description):
@@ -98,7 +102,6 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "connection_status" not in st.session_state:
     st.session_state.connection_status = {}
-# Cumulative token counters across all messages in the session
 if "total_input_tokens" not in st.session_state:
     st.session_state.total_input_tokens = 0
 if "total_output_tokens" not in st.session_state:
@@ -120,23 +123,6 @@ async def probe_servers(mcp_config):
                     version = extract_version_from_description(t.description or "")
                     if version:
                         break
-                if not version:
-                    search_tool = next(
-                        (t for t in tools if "search" in t.name.lower() or "fetch" in t.name.lower()),
-                        None,
-                    )
-                    if search_tool:
-                        try:
-                            probe = await session.call_tool(
-                                search_tool.name,
-                                {"query": "version release latest"},
-                            )
-                            probe_text = " ".join(
-                                c.text for c in probe.content if hasattr(c, "text")
-                            )
-                            version = extract_version_from_description(probe_text)
-                        except Exception:
-                            pass
                 results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
             except Exception as e:
                 results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
@@ -147,7 +133,7 @@ async def run_conversation(user_query, mcp_config, status):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     tool_registry = {}
     anthropic_tools = []
-    input_tokens = 0
+    input_tokens  = 0
     output_tokens = 0
 
     async with AsyncExitStack() as stack:
@@ -180,17 +166,23 @@ async def run_conversation(user_query, mcp_config, status):
         while True:
             turn += 1
             status.update(label="Thinking... (turn " + str(turn) + ")")
-            response = client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=4096,
-                tools=anthropic_tools,
-                messages=messages,
-            )
+            try:
+                response = client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=4096,
+                    tools=anthropic_tools,
+                    messages=messages,
+                )
+            except anthropic.RateLimitError:
+                status.update(label="Rate limit hit", state="error", expanded=False)
+                return (
+                    "Rate limit reached. You have exceeded the API quota for this minute. "
+                    "Please wait 60 seconds and try again. If this keeps happening, "
+                    "try reducing the number of active servers or shortening your query."
+                ), input_tokens, output_tokens
 
-            # Accumulate token usage from this API call
             input_tokens  += response.usage.input_tokens
             output_tokens += response.usage.output_tokens
-
             text_parts = [b.text for b in response.content if b.type == "text"]
 
             if response.stop_reason == "end_turn":
@@ -234,16 +226,24 @@ async def run_conversation(user_query, mcp_config, status):
                 return ("\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason), input_tokens, output_tokens
 
 
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
 st.set_page_config(page_title="GitMCP Doc Assistant", layout="wide")
 st.title("GitMCP Doc Assistant")
 st.caption("Query GitHub-hosted documentation via gitmcp.io. Only gitmcp.io servers are permitted.")
+st.info("Note: this app is single-turn. Each message is sent independently with no memory of previous messages. Clear chat history before starting a new topic for best results.")
 
 with st.sidebar:
     st.header("Library Catalogue")
-    st.markdown("Tick the libraries you want to query. Checked = active by default.")
+    st.markdown(
+        "Tick up to **" + str(MAX_ACTIVE_SERVERS) + "** libraries to query at once. "
+        "Selecting fewer reduces token usage and avoids rate limits."
+    )
+
+    # Count how many catalogue entries are currently checked
+    catalogue_checked = sum(
+        1 for lib in LIBRARY_CATALOGUE
+        if lib["shortname"] in st.session_state.active_shortnames
+    )
+    at_limit = catalogue_checked >= MAX_ACTIVE_SERVERS
 
     for lang in ["Python", "R"]:
         libs = [l for l in LIBRARY_CATALOGUE if l["lang"] == lang]
@@ -252,17 +252,25 @@ with st.sidebar:
         for idx, lib in enumerate(libs):
             col = cols[idx % 2]
             is_active = lib["shortname"] in st.session_state.active_shortnames
+            # Disable unchecked boxes when at the limit
+            disabled = at_limit and not is_active
             help_text = lib["desc"] + "\n\n" + gitmcp_url(lib["github"])
+            if disabled:
+                help_text = "Deselect another server first (max " + str(MAX_ACTIVE_SERVERS) + " active)"
             checked = col.checkbox(
                 lib["shortname"],
                 value=is_active,
                 key="cb_" + lib["shortname"],
                 help=help_text,
+                disabled=disabled,
             )
             if checked:
                 st.session_state.active_shortnames.add(lib["shortname"])
             else:
                 st.session_state.active_shortnames.discard(lib["shortname"])
+
+    if at_limit:
+        st.warning("Max " + str(MAX_ACTIVE_SERVERS) + " servers selected. Deselect one to choose another.")
 
     st.divider()
     st.subheader("Custom GitMCP server")
@@ -329,8 +337,6 @@ with st.sidebar:
         st.info("Select at least one library to start.")
 
     st.divider()
-
-    # Session cost summary in sidebar
     st.subheader("Session cost")
     total_cost = calc_cost(st.session_state.total_input_tokens, st.session_state.total_output_tokens)
     st.metric("Total cost", "$" + "{:.6f}".format(total_cost))
@@ -340,7 +346,30 @@ with st.sidebar:
     st.caption("Pricing: $1 / $5 per 1M tokens (claude-haiku-4-5)")
 
     st.divider()
-    if st.button("Clear chat history"):
+    if st.session_state.messages:
+        # Build download content
+        lines = []
+        lines.append("GitMCP Doc Assistant - Chat History")
+        lines.append("Exported: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        lines.append("=" * 60)
+        for m in st.session_state.messages:
+            role = m["role"].upper()
+            lines.append("")
+            lines.append("[" + role + "]")
+            lines.append(m["content"])
+            if m["role"] == "assistant" and "cost" in m:
+                lines.append("(cost: $" + "{:.6f}".format(m["cost"])
+                             + "  in: " + str(m["input_tokens"])
+                             + "  out: " + str(m["output_tokens"]) + " tokens)")
+        chat_text = "\n".join(lines)
+        st.download_button(
+            label="Download chat history",
+            data=chat_text,
+            file_name="chat_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    if st.button("Clear chat history", use_container_width=True):
         st.session_state.messages = []
         st.session_state.total_input_tokens  = 0
         st.session_state.total_output_tokens = 0
@@ -351,7 +380,6 @@ if not mcp_config:
     st.warning("Select at least one library from the sidebar to start chatting.")
     st.stop()
 
-# Connection status panel
 prev_config_key = str(sorted(mcp_config.items()))
 if st.session_state.connection_status.get("_config_key") != prev_config_key:
     with st.status("Probing servers...", expanded=True) as probe_status:
@@ -371,13 +399,13 @@ with st.expander("Connected servers", expanded=True):
     col_headers[3].markdown("**Doc version**")
     st.divider()
     for name in mcp_config:
-        info = conn.get(name, {})
-        ok      = info.get("ok", False)
-        n_tools = info.get("tools", 0)
-        version = info.get("version", None)
-        error   = info.get("error", None)
+        info     = conn.get(name, {})
+        ok       = info.get("ok", False)
+        n_tools  = info.get("tools", 0)
+        version  = info.get("version", None)
+        error    = info.get("error", None)
         lib_meta = catalogue_lookup.get(name)
-        label = name + (" (" + lib_meta["desc"] + ")" if lib_meta else "")
+        label    = name + (" (" + lib_meta["desc"] + ")" if lib_meta else "")
         version_str = version if version else "unknown"
         cols = st.columns([2, 1, 1, 2])
         cols[0].markdown(label)
@@ -389,7 +417,6 @@ with st.expander("Connected servers", expanded=True):
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Show per-message cost if stored
         if msg["role"] == "assistant" and "cost" in msg:
             st.caption(
                 "This response: $" + "{:.6f}".format(msg["cost"])
@@ -415,7 +442,6 @@ if prompt := st.chat_input(placeholder):
             + "  |  in: " + str(in_tok) + " tokens"
             + "  out: " + str(out_tok) + " tokens"
         )
-        # Persist cost metadata with the message
         st.session_state.messages.append({
             "role": "assistant",
             "content": answer,
@@ -423,7 +449,6 @@ if prompt := st.chat_input(placeholder):
             "output_tokens": out_tok,
             "cost": msg_cost,
         })
-        # Add to session totals
         st.session_state.total_input_tokens  += in_tok
         st.session_state.total_output_tokens += out_tok
         st.rerun()
