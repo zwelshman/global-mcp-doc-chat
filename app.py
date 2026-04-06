@@ -13,13 +13,13 @@ except KeyError:
     st.stop()
 
 GITMCP_BASE = "https://gitmcp.io/"
-MAX_ACTIVE_SERVERS = 1
+MAX_ACTIVE_SERVERS = 2
 
 INPUT_COST_PER_M  = 1.00
 OUTPUT_COST_PER_M = 5.00
 
 LIBRARY_CATALOGUE = [
-    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": False},
+    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": True},
     {"shortname": "bhf_pyspark_standard_pipeline", "github": "BHFDSC/standard-pipeline",   "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline",       "default": False},
     {"shortname": "bhf_ckd_phenotype",          "github": "BHFDSC/hds_phenotypes_ckd",    "lang": "Python", "desc": "BHF HDS DSC chronic kidney disease phenotype",  "default": False},
     {"shortname": "pandas",                     "github": "pandas-dev/pandas",             "lang": "Python", "desc": "Data structures & analysis",                   "default": False},
