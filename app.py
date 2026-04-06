@@ -13,7 +13,7 @@ except KeyError:
     st.stop()
 
 GITMCP_BASE = "https://gitmcp.io/"
-MAX_ACTIVE_SERVERS = 2
+MAX_ACTIVE_SERVERS = 1
 
 INPUT_COST_PER_M  = 1.00
 OUTPUT_COST_PER_M = 5.00
