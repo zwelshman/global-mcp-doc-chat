@@ -61,6 +61,31 @@ EXAMPLE_QUERY = (
     "and sum the number of persons."
 )
 
+CUSTOM_MCP_CATALOGUE = [
+    # Each entry names a key in st.secrets that holds {"url": "...", "token": "..."}
+    # "secret_key" must match the [section] name in secrets.toml
+    {"shortname": "context7",    "secret_key": "context7",    "desc": "Context7 library docs MCP"},
+    {"shortname": "my_supabase", "secret_key": "my_supabase", "desc": "My Supabase MCP server"},
+    # Add more entries here as needed
+]
+
+def load_custom_mcp_from_secrets():
+    """Return {shortname: {"url": ..., "token": ...}} for catalogue entries that exist in secrets."""
+    available = {}
+    for entry in CUSTOM_MCP_CATALOGUE:
+        key = entry["secret_key"]
+        try:
+            secret = st.secrets[key]
+            url = secret.get("url", "").strip()
+            if url:
+                available[entry["shortname"]] = {
+                    "url": url,
+                    "token": secret.get("token", "").strip(),
+                    "desc": entry["desc"],
+                }
+        except (KeyError, AttributeError):
+            pass  # Secret not configured — silently skip
+    return available
 
 def gitmcp_url(github):
     return GITMCP_BASE + github
@@ -351,23 +376,56 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.subheader("Custom MCP server")
-    st.caption("Connect any HTTP/HTTPS MCP server (e.g. Supabase, custom APIs).")
+ 
+   # ── Catalogue-style custom MCP servers (from secrets) ──────────────────────
+    # Pull URLs/tokens for catalogue-style custom servers that are active
+    available_custom = load_custom_mcp_from_secrets()
+    for sname, meta in available_custom.items():
+        if sname in st.session_state.active_shortnames:
+            mcp_config[sname] = meta["url"]
+            seen_names.add(sname)
+            if meta["token"]:
+                mcp_headers[sname] = {"Authorization": "Bearer " + meta["token"]}
 
-    custom_mcp_to_keep = []
-    for i, cs in enumerate(st.session_state.custom_mcp_servers):
-        c1, c2, c3 = st.columns([2, 5, 1])
-        new_name  = c1.text_input("Name",  value=cs["shortname"],      key="mcpname_"  + str(i),
-                                   label_visibility="collapsed", placeholder="shortname")
-        new_url   = c2.text_input("URL",   value=cs["url"],            key="mcpurl_"   + str(i),
-                                   label_visibility="collapsed", placeholder="https://...")
-        remove = c3.button("X", key="mcpdel_" + str(i))
-        new_token = st.text_input("Bearer token (optional)", value=cs.get("token", ""),
-                                   key="mcptoken_" + str(i), type="password",
-                                   placeholder="Leave blank if no auth required")
-        if not remove:
-            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url, "token": new_token})
-    st.session_state.custom_mcp_servers = custom_mcp_to_keep
+    if available_custom:
+        st.divider()
+        st.header("Custom MCP Servers")
+        st.markdown(
+            "Tick up to **" + str(MAX_ACTIVE_SERVERS) + "** servers to query at once. "
+            "URLs and tokens are loaded from Streamlit Secrets."
+        )
+
+        custom_entries = list(available_custom.items())
+        cols = st.columns(2)
+        for idx, (sname, meta) in enumerate(custom_entries):
+            col = cols[idx % 2]
+            is_active = sname in st.session_state.active_shortnames
+            # Recount across both catalogues
+            total_checked = sum(
+                1 for lib in LIBRARY_CATALOGUE
+                if lib["shortname"] in st.session_state.active_shortnames
+            ) + sum(
+                1 for s in available_custom
+                if s in st.session_state.active_shortnames
+            )
+            at_limit_now = total_checked >= MAX_ACTIVE_SERVERS
+            disabled = at_limit_now and not is_active
+            help_text = meta["desc"] + "\n\n" + meta["url"]
+            if disabled:
+                help_text = "Deselect another server first (max " + str(MAX_ACTIVE_SERVERS) + " active)"
+            checked = col.checkbox(
+                sname,
+                value=is_active,
+                key="cb_custom_" + sname,
+                help=help_text,
+                disabled=disabled,
+            )
+            if checked:
+                st.session_state.active_shortnames.add(sname)
+            else:
+                st.session_state.active_shortnames.discard(sname)
+
+    # ── Keep the freeform custom GitMCP + MCP sections below ───────────────────
 
     if st.button("Add custom MCP"):
         st.session_state.custom_mcp_servers.append({"shortname": "", "url": "", "token": ""})
