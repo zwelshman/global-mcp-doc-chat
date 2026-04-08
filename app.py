@@ -5,6 +5,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from contextlib import AsyncExitStack
 import re
+import httpx
 import json
 from datetime import datetime
 
@@ -121,12 +122,23 @@ if "total_output_tokens" not in st.session_state:
     st.session_state.total_output_tokens = 0
 
 
-async def probe_servers(mcp_config):
+async def probe_servers(mcp_config, mcp_headers=None):
+    if mcp_headers is None:
+        mcp_headers = {}
     results = {}
     async with AsyncExitStack() as stack:
         for name, url in mcp_config.items():
             try:
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                headers = mcp_headers.get(name)
+                if headers:
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    )
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
+                else:
+                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
                 tool_list = await session.list_tools()
@@ -138,7 +150,7 @@ async def probe_servers(mcp_config):
                         break
                 results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
             except Exception as e:
-                results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
+                results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
     return results
 
 
@@ -292,6 +304,31 @@ with st.sidebar:
 
     if at_limit:
         st.warning("Max " + str(MAX_ACTIVE_SERVERS) + " servers selected. Deselect one to choose another.")
+
+    st.divider()
+    st.subheader("Supabase")
+    supabase_libs = [l for l in LIBRARY_CATALOGUE if l.get("lang") == "Supabase"]
+    for lib in supabase_libs:
+        is_active = lib["shortname"] in st.session_state.active_shortnames
+        disabled = at_limit and not is_active
+        if not SUPABASE_MCP_URL:
+            disabled = True
+            help_text = lib["desc"] + " (set SUPABASE_MCP_URL and SUPABASE_MCP_TOKEN in secrets)"
+        elif disabled:
+            help_text = "Deselect another server first (max " + str(MAX_ACTIVE_SERVERS) + " active)"
+        else:
+            help_text = lib["desc"]
+        checked = st.checkbox(
+            lib["shortname"],
+            value=is_active,
+            key="cb_" + lib["shortname"],
+            help=help_text,
+            disabled=disabled,
+        )
+        if checked:
+            st.session_state.active_shortnames.add(lib["shortname"])
+        else:
+            st.session_state.active_shortnames.discard(lib["shortname"])
 
     st.divider()
     st.subheader("Custom GitMCP server")
