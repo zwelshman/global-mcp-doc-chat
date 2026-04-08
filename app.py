@@ -16,12 +16,6 @@ def unwrap_exc(e):
         return "; ".join(unwrap_exc(sub) for sub in e.exceptions)
     return str(e)
 
-try:
-    ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
-except KeyError:
-    st.error("Missing ANTHROPIC_API_KEY in Streamlit Secrets!")
-    st.stop()
-
 GITMCP_BASE = "https://gitmcp.io/"
 MAX_ACTIVE_SERVERS = 2
 
@@ -100,6 +94,7 @@ def extract_version_from_description(description):
     return None
 
 
+# ── Session state ────────────────────────────────────────────────────────────
 if "active_shortnames" not in st.session_state:
     st.session_state.active_shortnames = {
         lib["shortname"] for lib in LIBRARY_CATALOGUE if lib["default"]
@@ -116,6 +111,19 @@ if "total_input_tokens" not in st.session_state:
     st.session_state.total_input_tokens = 0
 if "total_output_tokens" not in st.session_state:
     st.session_state.total_output_tokens = 0
+if "user_api_key" not in st.session_state:
+    st.session_state.user_api_key = ""
+
+
+# ── Resolve API key ───────────────────────────────────────────────────────────
+def resolve_api_key():
+    """Return the active API key: user-supplied key wins over secret."""
+    if st.session_state.user_api_key.strip():
+        return st.session_state.user_api_key.strip()
+    try:
+        return st.secrets["ANTHROPIC_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        return None
 
 
 async def probe_servers(mcp_config, mcp_headers=None):
@@ -154,10 +162,10 @@ async def probe_servers(mcp_config, mcp_headers=None):
     return results
 
 
-async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
+async def run_conversation(user_query, mcp_config, status, api_key, mcp_headers=None):
     if mcp_headers is None:
         mcp_headers = {}
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    client = anthropic.Anthropic(api_key=api_key)
     tool_registry = {}
     anthropic_tools = []
     input_tokens  = 0
@@ -208,6 +216,13 @@ async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
                         tools=anthropic_tools,
                         messages=messages,
                     )
+                except anthropic.AuthenticationError:
+                    status.update(label="Authentication error", state="error", expanded=False)
+                    result_holder[0] = (
+                        "Authentication failed. Please check your Anthropic API key is correct.",
+                        input_tokens, output_tokens,
+                    )
+                    break
                 except anthropic.RateLimitError:
                     status.update(label="Rate limit hit", state="error", expanded=False)
                     result_holder[0] = (
@@ -279,19 +294,62 @@ async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
     return result_holder[0] if result_holder[0] is not None else ("(no response)", input_tokens, output_tokens)
 
 
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MCP Doc Assistant", layout="wide")
 st.title("MCP Doc Assistant")
 st.caption("Query GitHub-hosted documentation via gitmcp.io, or connect any custom HTTP MCP server.")
 st.info("Note: this app is single-turn. Each message is sent independently with no memory of previous messages. Clear chat history before starting a new topic for best results.")
 
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+
+    # ── API Key section (top of sidebar) ─────────────────────────────────────
+    st.header("Anthropic API Key")
+    has_secret = False
+    try:
+        _ = st.secrets["ANTHROPIC_API_KEY"]
+        has_secret = True
+    except (KeyError, FileNotFoundError):
+        pass
+
+    if has_secret:
+        st.caption("A server-side key is configured. Enter your own key below to override it.")
+    else:
+        st.caption("No server-side key found. Enter your Anthropic API key to use this app.")
+
+    user_key_input = st.text_input(
+        "API key",
+        value=st.session_state.user_api_key,
+        type="password",
+        placeholder="sk-ant-...",
+        label_visibility="collapsed",
+        help="Your key is stored only in your browser session and never saved server-side.",
+    )
+    st.session_state.user_api_key = user_key_input
+
+    # Validate format if a key has been entered
+    active_key = resolve_api_key()
+    if user_key_input and not user_key_input.strip().startswith("sk-ant-"):
+        st.warning("This doesn't look like an Anthropic key (expected `sk-ant-...`). Check and re-enter.")
+    elif user_key_input:
+        st.success("Using your API key.")
+    elif has_secret:
+        st.success("Using server-side API key.")
+
+    st.caption(
+        "Get a key at [console.anthropic.com](https://console.anthropic.com/settings/keys). "
+        "Usage is billed to your account at Haiku rates ($1/$5 per 1M tokens)."
+    )
+
+    st.divider()
+
+    # ── Library Catalogue ─────────────────────────────────────────────────────
     st.header("Library Catalogue")
     st.markdown(
         "Tick up to **" + str(MAX_ACTIVE_SERVERS) + "** libraries to query at once. "
         "Selecting fewer reduces token usage and avoids rate limits."
     )
 
-    # Count how many catalogue entries are currently checked
     catalogue_checked = sum(
         1 for lib in LIBRARY_CATALOGUE
         if lib["shortname"] in st.session_state.active_shortnames
@@ -305,7 +363,6 @@ with st.sidebar:
         for idx, lib in enumerate(libs):
             col = cols[idx % 2]
             is_active = lib["shortname"] in st.session_state.active_shortnames
-            # Disable unchecked boxes when at the limit
             disabled = at_limit and not is_active
             help_text = lib["desc"] + "\n\n" + gitmcp_url(lib["github"])
             if disabled:
@@ -447,7 +504,6 @@ with st.sidebar:
 
     st.divider()
     if st.session_state.messages:
-        # Build download content
         lines = []
         lines.append("GitMCP Doc Assistant - Chat History")
         lines.append("Exported: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -475,6 +531,12 @@ with st.sidebar:
         st.session_state.total_output_tokens = 0
         st.rerun()
 
+
+# ── Guard: require a valid API key before proceeding ─────────────────────────
+active_key = resolve_api_key()
+if not active_key:
+    st.warning("Please enter your Anthropic API key in the sidebar to use this app.")
+    st.stop()
 
 if not mcp_config:
     st.warning("Select at least one library from the sidebar to start chatting.")
@@ -534,7 +596,9 @@ if prompt := st.chat_input(placeholder):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.status("Starting...", expanded=True) as status:
-            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
+            answer, in_tok, out_tok = asyncio.run(
+                run_conversation(prompt, mcp_config, status, active_key, mcp_headers)
+            )
         st.markdown(answer)
         msg_cost = calc_cost(in_tok, out_tok)
         st.caption(
