@@ -424,10 +424,10 @@ if not mcp_config:
     st.warning("Select at least one library from the sidebar to start chatting.")
     st.stop()
 
-prev_config_key = str(sorted(mcp_config.items()))
+prev_config_key = str(sorted(mcp_config.items())) + str(sorted(mcp_headers.items()))
 if st.session_state.connection_status.get("_config_key") != prev_config_key:
     with st.status("Probing servers...", expanded=True) as probe_status:
-        probe_results = asyncio.run(probe_servers(mcp_config))
+        probe_results = asyncio.run(probe_servers(mcp_config, mcp_headers))
         st.session_state.connection_status = probe_results
         st.session_state.connection_status["_config_key"] = prev_config_key
         probe_status.update(label="Server probe complete", state="complete", expanded=False)
