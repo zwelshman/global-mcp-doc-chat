@@ -31,7 +31,7 @@ INPUT_COST_PER_M  = 1.00
 OUTPUT_COST_PER_M = 5.00
 
 LIBRARY_CATALOGUE = [
-    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": True},
+    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": False},
     {"shortname": "bhf_pyspark_standard_pipeline", "github": "BHFDSC/standard-pipeline",   "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline",       "default": False},
     {"shortname": "bhf_ckd_phenotype",          "github": "BHFDSC/hds_phenotypes_ckd",    "lang": "Python", "desc": "BHF HDS DSC chronic kidney disease phenotype",  "default": False},
     {"shortname": "pandas",                     "github": "pandas-dev/pandas",             "lang": "Python", "desc": "Data structures & analysis",                   "default": False},
@@ -55,7 +55,7 @@ LIBRARY_CATALOGUE = [
     {"shortname": "tidymodels",                 "github": "tidymodels/tidymodels",         "lang": "R",      "desc": "Tidy modelling framework",                     "default": False},
     {"shortname": "data.table",                 "github": "Rdatatable/data.table",         "lang": "R",      "desc": "Fast in-memory data wrangling",               "default": False},
     # Supabase MCP servers
-    {"shortname": "hds_dataset_summary",        "github": None,                              "lang": "Supabase", "desc": "HDS dataset summary (Supabase MCP)",          "default": True},
+    {"shortname": "hds_dataset_summary",        "github": None,                              "lang": "Supabase", "desc": "HDS dataset summary (Supabase MCP)",          "default": False},
 ]
 
 LANG_LABEL = {"Python": "Python", "R": "R", "Supabase": "Supabase"}
@@ -154,7 +154,9 @@ async def probe_servers(mcp_config, mcp_headers=None):
     return results
 
 
-async def run_conversation(user_query, mcp_config, status):
+async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
+    if mcp_headers is None:
+        mcp_headers = {}
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     tool_registry = {}
     anthropic_tools = []
@@ -165,7 +167,16 @@ async def run_conversation(user_query, mcp_config, status):
         for name, url in mcp_config.items():
             status.update(label="Connecting to " + name + "...")
             try:
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                headers = mcp_headers.get(name)
+                if headers:
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    )
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
+                else:
+                    read, write, _ = await stack.enter_async_context(streamable_http_client(url))
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
                 result = await session.list_tools()
@@ -179,7 +190,7 @@ async def run_conversation(user_query, mcp_config, status):
                     })
                 status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
             except Exception as e:
-                status.write("Unreachable: " + name + " - " + str(e))
+                status.write("Unreachable: " + name + " - " + unwrap_exc(e))
 
         if not tool_registry:
             return "No MCP servers could be reached.", 0, 0
@@ -515,7 +526,7 @@ if prompt := st.chat_input(placeholder):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.status("Starting...", expanded=True) as status:
-            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status))
+            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
         st.markdown(answer)
         msg_cost = calc_cost(in_tok, out_tok)
         st.caption(
