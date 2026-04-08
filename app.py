@@ -9,7 +9,6 @@ import re
 import json
 from datetime import datetime
 
-# ─── HELPER FUNCTIONS ────────────────────────────────────────────────────────
 
 def unwrap_exc(e):
     """Return a readable message, unwrapping BaseExceptionGroup if needed."""
@@ -17,23 +16,74 @@ def unwrap_exc(e):
         return "; ".join(unwrap_exc(sub) for sub in e.exceptions)
     return str(e)
 
+try:
+    ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
+except KeyError:
+    st.error("Missing ANTHROPIC_API_KEY in Streamlit Secrets!")
+    st.stop()
+
+GITMCP_BASE = "https://gitmcp.io/"
+MAX_ACTIVE_SERVERS = 2
+
+INPUT_COST_PER_M  = 1.00
+OUTPUT_COST_PER_M = 5.00
+
+LIBRARY_CATALOGUE = [
+    {"shortname": "bhf_docs",                   "github": "BHFDSC/documentation",          "lang": "Python", "desc": "BHF DSC data curation documentation",         "default": True},
+    {"shortname": "bhf_pyspark_standard_pipeline", "github": "BHFDSC/standard-pipeline",   "lang": "Python", "desc": "BHF DSC pyspark data curation pipeline",       "default": False},
+    {"shortname": "bhf_ckd_phenotype",          "github": "BHFDSC/hds_phenotypes_ckd",    "lang": "Python", "desc": "BHF HDS DSC chronic kidney disease phenotype",  "default": False},
+    {"shortname": "pandas",                     "github": "pandas-dev/pandas",             "lang": "Python", "desc": "Data structures & analysis",                   "default": False},
+    {"shortname": "numpy",                      "github": "numpy/numpy",                   "lang": "Python", "desc": "Scientific computing",                         "default": False},
+    {"shortname": "sklearn",                    "github": "scikit-learn/scikit-learn",     "lang": "Python", "desc": "Machine learning",                             "default": False},
+    {"shortname": "matplotlib",                 "github": "matplotlib/matplotlib",         "lang": "Python", "desc": "Plotting & visualisation",                     "default": False},
+    {"shortname": "seaborn",                    "github": "mwaskom/seaborn",               "lang": "Python", "desc": "Statistical visualisation",                    "default": False},
+    {"shortname": "scipy",                      "github": "scipy/scipy",                   "lang": "Python", "desc": "Scientific & engineering maths",               "default": False},
+    {"shortname": "statsmodels",                "github": "statsmodels/statsmodels",       "lang": "Python", "desc": "Statistical modelling & tests",                "default": False},
+    {"shortname": "pyspark",                    "github": "apache/spark",                  "lang": "Python", "desc": "Distributed data processing",                  "default": False},
+    {"shortname": "polars",                     "github": "pola-rs/polars",                "lang": "Python", "desc": "Fast DataFrames (Rust-backed)",               "default": False},
+    {"shortname": "pytorch",                    "github": "pytorch/pytorch",               "lang": "Python", "desc": "Deep learning framework",                      "default": False},
+    {"shortname": "xgboost",                    "github": "dmlc/xgboost",                 "lang": "Python", "desc": "Gradient boosting",                            "default": False},
+    {"shortname": "lightgbm",                   "github": "microsoft/LightGBM",            "lang": "Python", "desc": "Fast gradient boosting",                       "default": False},
+    {"shortname": "dbplyr",                     "github": "tidyverse/dbplyr",              "lang": "R",      "desc": "dplyr backend for databases",                  "default": False},
+    {"shortname": "dplyr",                      "github": "tidyverse/dplyr",               "lang": "R",      "desc": "Data manipulation grammar",                    "default": False},
+    {"shortname": "ggplot2",                    "github": "tidyverse/ggplot2",             "lang": "R",      "desc": "Grammar of graphics",                          "default": False},
+    {"shortname": "tidyr",                      "github": "tidyverse/tidyr",               "lang": "R",      "desc": "Tidy data reshaping",                          "default": False},
+    {"shortname": "purrr",                      "github": "tidyverse/purrr",               "lang": "R",      "desc": "Functional programming tools",                 "default": False},
+    {"shortname": "caret",                      "github": "topepo/caret",                  "lang": "R",      "desc": "ML training & tuning",                         "default": False},
+    {"shortname": "tidymodels",                 "github": "tidymodels/tidymodels",         "lang": "R",      "desc": "Tidy modelling framework",                     "default": False},
+    {"shortname": "data.table",                 "github": "Rdatatable/data.table",         "lang": "R",      "desc": "Fast in-memory data wrangling",               "default": False},
+]
+
+LANG_LABEL = {"Python": "Python", "R": "R"}
+
+EXAMPLE_QUERY = (
+    "Using the pandas docs, generate code to group by a disease column "
+    "and sum the number of persons."
+)
+
+
 def gitmcp_url(github):
-    return f"https://gitmcp.io/{github}"
+    return GITMCP_BASE + github
+
 
 def is_valid_gitmcp_url(url):
     pattern = r"^https://gitmcp\.io/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/?$"
     return bool(re.match(pattern, url.strip()))
+
 
 def normalise_gitmcp_url(raw):
     raw = raw.strip().rstrip("/")
     if raw.startswith("https://gitmcp.io/"):
         return raw
     if "/" in raw and not raw.startswith("http"):
-        return f"https://gitmcp.io/{raw}"
+        return GITMCP_BASE + raw
     return raw
 
+
 def calc_cost(input_tokens, output_tokens):
-    return (input_tokens / 1_000_000 * 1.00) + (output_tokens / 1_000_000 * 5.00)
+    return (input_tokens / 1_000_000 * INPUT_COST_PER_M
+            + output_tokens / 1_000_000 * OUTPUT_COST_PER_M)
+
 
 def extract_version_from_description(description):
     if not description:
@@ -49,280 +99,456 @@ def extract_version_from_description(description):
             return m.group(1)
     return None
 
-# ─── CONFIG & CATALOGUES ─────────────────────────────────────────────────────
 
-try:
-    ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
-except KeyError:
-    st.error("Missing ANTHROPIC_API_KEY in Streamlit Secrets!")
-    st.stop()
+if "active_shortnames" not in st.session_state:
+    st.session_state.active_shortnames = {
+        lib["shortname"] for lib in LIBRARY_CATALOGUE if lib["default"]
+    }
+if "custom_servers" not in st.session_state:
+    st.session_state.custom_servers = []
+if "custom_mcp_servers" not in st.session_state:
+    st.session_state.custom_mcp_servers = []
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "connection_status" not in st.session_state:
+    st.session_state.connection_status = {}
+if "total_input_tokens" not in st.session_state:
+    st.session_state.total_input_tokens = 0
+if "total_output_tokens" not in st.session_state:
+    st.session_state.total_output_tokens = 0
 
-MAX_ACTIVE_SERVERS = 2
-
-LIBRARY_CATALOGUE = [
-    {"shortname": "bhf_docs", "github": "BHFDSC/documentation", "lang": "Python", "desc": "BHF DSC data curation documentation", "default": True},
-    {"shortname": "pandas", "github": "pandas-dev/pandas", "lang": "Python", "desc": "Data structures & analysis", "default": False},
-    {"shortname": "numpy", "github": "numpy/numpy", "lang": "Python", "desc": "Scientific computing", "default": False},
-    {"shortname": "sklearn", "github": "scikit-learn/scikit-learn", "lang": "Python", "desc": "Machine learning", "default": False},
-    {"shortname": "matplotlib", "github": "matplotlib/matplotlib", "lang": "Python", "desc": "Plotting & visualisation", "default": False},
-    {"shortname": "pyspark", "github": "apache/spark", "lang": "Python", "desc": "Distributed data processing", "default": False},
-    {"shortname": "dplyr", "github": "tidyverse/dplyr", "lang": "R", "desc": "Data manipulation grammar", "default": False},
-    {"shortname": "ggplot2", "github": "tidyverse/ggplot2", "lang": "R", "desc": "Grammar of graphics", "default": False},
-]
-
-CUSTOM_MCP_CATALOGUE = [
-    {"shortname": "context7", "secret_key": "context7", "desc": "Context7 library docs MCP"},
-    {"shortname": "my_supabase", "secret_key": "my_supabase", "desc": "My Supabase MCP server"},
-]
-
-def load_custom_mcp_from_secrets():
-    available = {}
-    for entry in CUSTOM_MCP_CATALOGUE:
-        key = entry["secret_key"]
-        try:
-            if key in st.secrets:
-                secret = st.secrets[key]
-                url = secret.get("url", "").strip()
-                if url:
-                    available[entry["shortname"]] = {
-                        "url": url,
-                        "token": secret.get("token", "").strip(),
-                        "desc": entry["desc"],
-                    }
-        except Exception:
-            pass
-    return available
-
-# ─── ASYNC MCP CLIENT LOGIC ──────────────────────────────────────────────────
 
 async def probe_servers(mcp_config, mcp_headers=None):
-    if mcp_headers is None: mcp_headers = {}
+    if mcp_headers is None:
+        mcp_headers = {}
     results = {}
-    async with AsyncExitStack() as stack:
-        for name, url in mcp_config.items():
-            try:
-                headers = mcp_headers.get(name)
-                http_client = await stack.enter_async_context(httpx.AsyncClient(headers=headers)) if headers else None
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url, http_client=http_client))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                tool_list = await session.list_tools()
-                version = None
-                for t in tool_list.tools:
-                    version = extract_version_from_description(t.description or "")
-                    if version: break
-                results[name] = {"ok": True, "tools": len(tool_list.tools), "version": version, "error": None}
-            except Exception as e:
+    try:
+        async with AsyncExitStack() as stack:
+            for name, url in mcp_config.items():
+                try:
+                    headers = mcp_headers.get(name)
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    ) if headers else None
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    tool_list = await session.list_tools()
+                    tools = tool_list.tools
+                    version = None
+                    for t in tools:
+                        version = extract_version_from_description(t.description or "")
+                        if version:
+                            break
+                    results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
+                except Exception as e:
+                    results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        for name in mcp_config:
+            if name not in results:
                 results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
     return results
 
+
 async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
-    if mcp_headers is None: mcp_headers = {}
+    if mcp_headers is None:
+        mcp_headers = {}
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    tool_registry, anthropic_tools = {}, []
-    input_tokens, output_tokens = 0, 0
+    tool_registry = {}
+    anthropic_tools = []
+    input_tokens  = 0
+    output_tokens = 0
 
-    async with AsyncExitStack() as stack:
-        for name, url in mcp_config.items():
-            try:
-                headers = mcp_headers.get(name)
-                http_client = await stack.enter_async_context(httpx.AsyncClient(headers=headers)) if headers else None
-                read, write, _ = await stack.enter_async_context(streamable_http_client(url, http_client=http_client))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                result = await session.list_tools()
-                for t in result.tools:
-                    prefixed = f"{name}_{t.name}"
-                    tool_registry[prefixed] = (session, t.name)
-                    anthropic_tools.append({"name": prefixed, "description": t.description or "", "input_schema": t.inputSchema})
-            except Exception as e:
-                status.write(f"⚠️ {name} failed: {unwrap_exc(e)}")
+    result_holder = [None]
+    try:
+        async with AsyncExitStack() as stack:
+            for name, url in mcp_config.items():
+                status.update(label="Connecting to " + name + "...")
+                try:
+                    headers = mcp_headers.get(name)
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers)
+                    ) if headers else None
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(url, http_client=http_client)
+                    )
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                    result = await session.list_tools()
+                    for t in result.tools:
+                        prefixed = name + "_" + t.name
+                        tool_registry[prefixed] = (session, t.name)
+                        anthropic_tools.append({
+                            "name": prefixed,
+                            "description": t.description or "",
+                            "input_schema": t.inputSchema,
+                        })
+                    status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
+                except Exception as e:
+                    status.write("Unreachable: " + name + " - " + unwrap_exc(e))
 
-        if not tool_registry: return "No MCP servers could be reached.", 0, 0
+            if not tool_registry:
+                return "No MCP servers could be reached.", 0, 0
 
-        messages = [{"role": "user", "content": user_query}]
-        while True:
-            response = client.messages.create(
-                model="claude-3-5-haiku-latest",
-                max_tokens=4096,
-                tools=anthropic_tools,
-                messages=messages,
-            )
-            input_tokens += response.usage.input_tokens
-            output_tokens += response.usage.output_tokens
-            
-            if response.stop_reason == "end_turn":
-                return "".join([b.text for b in response.content if b.type == "text"]), input_tokens, output_tokens
+            status.write("Tools available: " + ", ".join(tool_registry.keys()))
+            messages = [{"role": "user", "content": user_query}]
+            turn = 0
 
-            if response.stop_reason == "tool_use":
-                messages.append({"role": "assistant", "content": response.content})
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        session, orig_name = tool_registry[block.name]
-                        try:
-                            res = await session.call_tool(orig_name, block.input)
-                            txt = "\n".join(c.text for c in res.content if hasattr(c, "text"))
-                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": txt})
-                        except Exception as e:
-                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {str(e)}", "is_error": True})
-                messages.append({"role": "user", "content": tool_results})
+            while True:
+                turn += 1
+                status.update(label="Thinking... (turn " + str(turn) + ")")
+                try:
+                    response = client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=4096,
+                        tools=anthropic_tools,
+                        messages=messages,
+                    )
+                except anthropic.RateLimitError:
+                    status.update(label="Rate limit hit", state="error", expanded=False)
+                    result_holder[0] = (
+                        "Rate limit reached. You have exceeded the API quota for this minute. "
+                        "Please wait 60 seconds and try again. If this keeps happening, "
+                        "try reducing the number of active servers or shortening your query.",
+                        input_tokens, output_tokens,
+                    )
+                    break
 
-# ─── APP STATE INITIALIZATION ────────────────────────────────────────────────
+                input_tokens  += response.usage.input_tokens
+                output_tokens += response.usage.output_tokens
+                text_parts = [b.text for b in response.content if b.type == "text"]
+
+                if response.stop_reason == "end_turn":
+                    status.update(label="Done", state="complete", expanded=False)
+                    result_holder[0] = (
+                        "\n".join(text_parts) if text_parts else "(no response)",
+                        input_tokens, output_tokens,
+                    )
+                    break
+
+                if response.stop_reason == "tool_use":
+                    messages.append({"role": "assistant", "content": response.content})
+                    if text_parts:
+                        status.write("Reasoning: " + " ".join(text_parts))
+                    tool_results = []
+                    for block in response.content:
+                        if block.type != "tool_use":
+                            continue
+                        status.update(label="Calling " + block.name + "...")
+                        with status.container():
+                            with st.expander("Tool: " + block.name, expanded=False):
+                                st.json(block.input)
+                        if block.name not in tool_registry:
+                            result_text = "Unknown tool: " + block.name
+                        else:
+                            session, orig_name = tool_registry[block.name]
+                            try:
+                                call_result = await session.call_tool(orig_name, block.input)
+                                result_text = "\n".join(
+                                    c.text for c in call_result.content if hasattr(c, "text")
+                                ) or "(empty result)"
+                                preview = result_text[:300] + "..." if len(result_text) > 300 else result_text
+                                status.write(block.name + " returned: " + preview)
+                            except Exception as e:
+                                result_text = "Tool error: " + str(e)
+                                status.write(block.name + " error: " + str(e))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_text,
+                        })
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    status.update(label="Unexpected stop: " + response.stop_reason, state="error")
+                    result_holder[0] = (
+                        "\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason,
+                        input_tokens, output_tokens,
+                    )
+                    break
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        if result_holder[0] is None:
+            status.update(label="Connection error", state="error", expanded=False)
+            result_holder[0] = ("MCP connection error: " + unwrap_exc(e), input_tokens, output_tokens)
+
+    return result_holder[0] if result_holder[0] is not None else ("(no response)", input_tokens, output_tokens)
+
 
 st.set_page_config(page_title="MCP Doc Assistant", layout="wide")
-
-for key, val in [
-    ("active_shortnames", {l["shortname"] for l in LIBRARY_CATALOGUE if l["default"]}),
-    ("custom_servers", []),
-    ("custom_mcp_servers", []),
-    ("messages", []),
-    ("connection_status", {}),
-    ("total_input_tokens", 0),
-    ("total_output_tokens", 0)
-]:
-    if key not in st.session_state: st.session_state[key] = val
-
-# ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+st.title("MCP Doc Assistant")
+st.caption("Query GitHub-hosted documentation via gitmcp.io, or connect any custom HTTP MCP server.")
+st.info("Note: this app is single-turn. Each message is sent independently with no memory of previous messages. Clear chat history before starting a new topic for best results.")
 
 with st.sidebar:
     st.header("Library Catalogue")
-    
-    mcp_config, mcp_headers, seen_names, errors = {}, {}, set(), []
-    available_custom = load_custom_mcp_from_secrets()
+    st.markdown(
+        "Tick up to **" + str(MAX_ACTIVE_SERVERS) + "** libraries to query at once. "
+        "Selecting fewer reduces token usage and avoids rate limits."
+    )
 
-    # Total Count Logic
-    total_checked = sum(1 for lib in LIBRARY_CATALOGUE if lib["shortname"] in st.session_state.active_shortnames) + \
-                    sum(1 for s in available_custom if s in st.session_state.active_shortnames)
-    at_limit = total_checked >= MAX_ACTIVE_SERVERS
+    # Count how many catalogue entries are currently checked
+    catalogue_checked = sum(
+        1 for lib in LIBRARY_CATALOGUE
+        if lib["shortname"] in st.session_state.active_shortnames
+    )
+    at_limit = catalogue_checked >= MAX_ACTIVE_SERVERS
 
-    # 1. Main Library Catalogue
     for lang in ["Python", "R"]:
-        st.subheader(lang)
-        cols = st.columns(2)
         libs = [l for l in LIBRARY_CATALOGUE if l["lang"] == lang]
-        for idx, lib in enumerate(libs):
-            sname = lib["shortname"]
-            is_active = sname in st.session_state.active_shortnames
-            checked = cols[idx % 2].checkbox(sname, value=is_active, disabled=(at_limit and not is_active), key=f"cb_{sname}", help=lib["desc"])
-            if checked:
-                st.session_state.active_shortnames.add(sname)
-                mcp_config[sname] = gitmcp_url(lib["github"])
-                seen_names.add(sname)
-            else:
-                st.session_state.active_shortnames.discard(sname)
-
-    # 2. Secret-Driven Custom Catalogue
-    if available_custom:
-        st.divider()
-        st.header("Custom MCP Servers")
+        st.subheader(LANG_LABEL[lang])
         cols = st.columns(2)
-        for idx, (sname, meta) in enumerate(available_custom.items()):
-            is_active = sname in st.session_state.active_shortnames
-            checked = cols[idx % 2].checkbox(sname, value=is_active, disabled=(at_limit and not is_active), key=f"cb_cust_{sname}", help=meta["desc"])
+        for idx, lib in enumerate(libs):
+            col = cols[idx % 2]
+            is_active = lib["shortname"] in st.session_state.active_shortnames
+            # Disable unchecked boxes when at the limit
+            disabled = at_limit and not is_active
+            help_text = lib["desc"] + "\n\n" + gitmcp_url(lib["github"])
+            if disabled:
+                help_text = "Deselect another server first (max " + str(MAX_ACTIVE_SERVERS) + " active)"
+            checked = col.checkbox(
+                lib["shortname"],
+                value=is_active,
+                key="cb_" + lib["shortname"],
+                help=help_text,
+                disabled=disabled,
+            )
             if checked:
-                st.session_state.active_shortnames.add(sname)
-                mcp_config[sname] = meta["url"]
-                seen_names.add(sname)
-                if meta["token"]: mcp_headers[sname] = {"Authorization": f"Bearer {meta['token']}"}
+                st.session_state.active_shortnames.add(lib["shortname"])
             else:
-                st.session_state.active_shortnames.discard(sname)
+                st.session_state.active_shortnames.discard(lib["shortname"])
 
-    # 3. Freeform Custom GitMCP
+    if at_limit:
+        st.warning("Max " + str(MAX_ACTIVE_SERVERS) + " servers selected. Deselect one to choose another.")
+
     st.divider()
-    st.subheader("Manual GitMCP")
+    st.subheader("Custom GitMCP server")
+    with st.expander("Example", expanded=False):
+        st.markdown(
+            "**Short name:** `pysparkdocs`  \n"
+            "**URL:** `apache/spark`  \n\n"
+            "Try asking: " + EXAMPLE_QUERY
+        )
+
     custom_to_keep = []
     for i, cs in enumerate(st.session_state.custom_servers):
         c1, c2, c3 = st.columns([2, 4, 1])
-        n = c1.text_input("Name", value=cs["shortname"], key=f"cn_{i}", label_visibility="collapsed", placeholder="Name")
-        u = c2.text_input("URL", value=cs["url"], key=f"cu_{i}", label_visibility="collapsed", placeholder="owner/repo")
-        if not c3.button("X", key=f"cd_{i}"):
-            custom_to_keep.append({"shortname": n, "url": u})
-            if n and u:
-                norm = normalise_gitmcp_url(u)
-                if n in seen_names: errors.append(f"Duplicate name: {n}")
-                elif not is_valid_gitmcp_url(norm): errors.append(f"Invalid GitMCP URL: {n}")
-                else:
-                    mcp_config[n] = norm
-                    seen_names.add(n)
+        new_name = c1.text_input("Name", value=cs["shortname"], key="cname_" + str(i),
+                                  label_visibility="collapsed", placeholder="shortname")
+        new_url  = c2.text_input("URL",  value=cs["url"],       key="curl_"  + str(i),
+                                  label_visibility="collapsed", placeholder="owner/repo")
+        remove = c3.button("X", key="cdel_" + str(i))
+        if not remove:
+            custom_to_keep.append({"shortname": new_name, "url": new_url})
     st.session_state.custom_servers = custom_to_keep
-    if st.button("Add Manual GitMCP"):
+
+    if st.button("Add custom server"):
         st.session_state.custom_servers.append({"shortname": "", "url": ""})
         st.rerun()
 
-    # 4. Freeform Custom HTTP MCP
-    st.subheader("Manual HTTP MCP")
-    mcp_to_keep = []
+    st.divider()
+    st.subheader("Custom MCP server")
+    st.caption("Connect any HTTP/HTTPS MCP server (e.g. Supabase, custom APIs).")
+
+    custom_mcp_to_keep = []
     for i, cs in enumerate(st.session_state.custom_mcp_servers):
-        c1, c2, c3 = st.columns([2, 4, 1])
-        n = c1.text_input("Name", value=cs["shortname"], key=f"mn_{i}", label_visibility="collapsed", placeholder="Name")
-        u = c2.text_input("URL", value=cs["url"], key=f"mu_{i}", label_visibility="collapsed", placeholder="https://...")
-        t = st.text_input("Token", value=cs.get("token",""), key=f"mt_{i}", type="password", placeholder="Bearer token (optional)")
-        if not c3.button("X", key=f"md_{i}"):
-            mcp_to_keep.append({"shortname": n, "url": u, "token": t})
-            if n and u:
-                if n in seen_names: errors.append(f"Duplicate name: {n}")
-                else:
-                    mcp_config[n] = u
-                    seen_names.add(n)
-                    if t: mcp_headers[n] = {"Authorization": f"Bearer {t}"}
-    st.session_state.custom_mcp_servers = mcp_to_keep
-    if st.button("Add Manual HTTP"):
+        c1, c2, c3 = st.columns([2, 5, 1])
+        new_name  = c1.text_input("Name",  value=cs["shortname"],      key="mcpname_"  + str(i),
+                                   label_visibility="collapsed", placeholder="shortname")
+        new_url   = c2.text_input("URL",   value=cs["url"],            key="mcpurl_"   + str(i),
+                                   label_visibility="collapsed", placeholder="https://...")
+        remove = c3.button("X", key="mcpdel_" + str(i))
+        new_token = st.text_input("Bearer token (optional)", value=cs.get("token", ""),
+                                   key="mcptoken_" + str(i), type="password",
+                                   placeholder="Leave blank if no auth required")
+        if not remove:
+            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url, "token": new_token})
+    st.session_state.custom_mcp_servers = custom_mcp_to_keep
+
+    if st.button("Add custom MCP"):
         st.session_state.custom_mcp_servers.append({"shortname": "", "url": "", "token": ""})
         st.rerun()
 
-    for e in errors: st.warning(e)
-
-    # Costs & Exports
     st.divider()
+    errors = []
+    mcp_config = {}
+    mcp_headers = {}
+    seen_names = set()
+
+    for lib in LIBRARY_CATALOGUE:
+        if lib["shortname"] in st.session_state.active_shortnames:
+            mcp_config[lib["shortname"]] = gitmcp_url(lib["github"])
+            seen_names.add(lib["shortname"])
+
+    for cs in st.session_state.custom_servers:
+        name = cs["shortname"].strip()
+        raw  = cs["url"].strip()
+        if not name and not raw:
+            continue
+        if not name:
+            errors.append("A custom server is missing a short name.")
+            continue
+        if not re.match(r"^[A-Za-z0-9_]+$", name):
+            errors.append(name + ": use only letters, digits, underscores.")
+            continue
+        if name in seen_names:
+            errors.append("Duplicate short name: " + name)
+            continue
+        resolved = normalise_gitmcp_url(raw)
+        if not is_valid_gitmcp_url(resolved):
+            errors.append(name + ": must be a gitmcp.io/owner/repo URL.")
+            continue
+        seen_names.add(name)
+        mcp_config[name] = resolved
+
+    for cs in st.session_state.custom_mcp_servers:
+        name = cs["shortname"].strip()
+        url  = cs["url"].strip()
+        if not name and not url:
+            continue
+        if not name:
+            errors.append("A custom MCP server is missing a short name.")
+            continue
+        if not re.match(r"^[A-Za-z0-9_]+$", name):
+            errors.append(name + ": use only letters, digits, underscores.")
+            continue
+        if name in seen_names:
+            errors.append("Duplicate short name: " + name)
+            continue
+        if not url.startswith("https://"):
+            errors.append(name + ": URL must start with https://")
+            continue
+        seen_names.add(name)
+        mcp_config[name] = url
+        token = cs.get("token", "").strip()
+        if token:
+            mcp_headers[name] = {"Authorization": "Bearer " + token}
+
+    for e in errors:
+        st.warning(e)
+
+    if mcp_config:
+        st.success(str(len(mcp_config)) + " server(s) configured")
+    else:
+        st.info("Select at least one library to start.")
+
+    st.divider()
+    st.subheader("Session cost")
     total_cost = calc_cost(st.session_state.total_input_tokens, st.session_state.total_output_tokens)
-    st.metric("Session Cost", f"${total_cost:.4f}")
-    
+    st.metric("Total cost", "$" + "{:.6f}".format(total_cost))
+    c1, c2 = st.columns(2)
+    c1.metric("Input tokens",  "{:,}".format(st.session_state.total_input_tokens))
+    c2.metric("Output tokens", "{:,}".format(st.session_state.total_output_tokens))
+    st.caption("Pricing: $1 / $5 per 1M tokens (claude-haiku-4-5)")
+
+    st.divider()
     if st.session_state.messages:
-        chat_text = "\n".join([f"[{m['role'].upper()}]\n{m['content']}\n" for m in st.session_state.messages])
-        st.download_button("Download History", data=chat_text, file_name=f"chat_{datetime.now().strftime('%H%M%S')}.txt")
-    
-    if st.button("Clear History", use_container_width=True):
-        st.session_state.messages, st.session_state.total_input_tokens, st.session_state.total_output_tokens = [], 0, 0
+        # Build download content
+        lines = []
+        lines.append("GitMCP Doc Assistant - Chat History")
+        lines.append("Exported: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        lines.append("=" * 60)
+        for m in st.session_state.messages:
+            role = m["role"].upper()
+            lines.append("")
+            lines.append("[" + role + "]")
+            lines.append(m["content"])
+            if m["role"] == "assistant" and "cost" in m:
+                lines.append("(cost: $" + "{:.6f}".format(m["cost"])
+                             + "  in: " + str(m["input_tokens"])
+                             + "  out: " + str(m["output_tokens"]) + " tokens)")
+        chat_text = "\n".join(lines)
+        st.download_button(
+            label="Download chat history",
+            data=chat_text,
+            file_name="chat_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    if st.button("Clear chat history", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.total_input_tokens  = 0
+        st.session_state.total_output_tokens = 0
         st.rerun()
 
-# ─── MAIN UI ─────────────────────────────────────────────────────────────────
-
-st.title("MCP Doc Assistant")
 
 if not mcp_config:
-    st.info("Select at least one server in the sidebar to begin.")
+    st.warning("Select at least one library from the sidebar to start chatting.")
     st.stop()
 
-# Connection Status & Probe
-prev_config_key = str(sorted(mcp_config.items()))
-if st.session_state.connection_status.get("_key") != prev_config_key:
-    with st.status("Probing servers...") as s:
-        st.session_state.connection_status = asyncio.run(probe_servers(mcp_config, mcp_headers))
-        st.session_state.connection_status["_key"] = prev_config_key
-        s.update(label="Server Probe Complete", state="complete")
+prev_config_key = str(sorted(mcp_config.items())) + str(sorted(mcp_headers.items()))
+if st.session_state.connection_status.get("_config_key") != prev_config_key:
+    with st.status("Probing servers...", expanded=True) as probe_status:
+        probe_results = asyncio.run(probe_servers(mcp_config, mcp_headers))
+        st.session_state.connection_status = probe_results
+        st.session_state.connection_status["_config_key"] = prev_config_key
+        probe_status.update(label="Server probe complete", state="complete", expanded=False)
 
-with st.expander("Connected Servers", expanded=False):
-    for name, url in mcp_config.items():
-        info = st.session_state.connection_status.get(name, {})
-        status_icon = "✅" if info.get("ok") else "❌"
-        st.write(f"{status_icon} **{name}**: {info.get('tools', 0)} tools | Version: {info.get('version') or 'N/A'}")
+conn = st.session_state.connection_status
 
-# Chat Feed
+with st.expander("Connected servers", expanded=True):
+    catalogue_lookup = {l["shortname"]: l for l in LIBRARY_CATALOGUE}
+    col_headers = st.columns([2, 1, 1, 2])
+    col_headers[0].markdown("**Server**")
+    col_headers[1].markdown("**Status**")
+    col_headers[2].markdown("**Tools**")
+    col_headers[3].markdown("**Doc version**")
+    st.divider()
+    for name in mcp_config:
+        info     = conn.get(name, {})
+        ok       = info.get("ok", False)
+        n_tools  = info.get("tools", 0)
+        version  = info.get("version", None)
+        error    = info.get("error", None)
+        lib_meta = catalogue_lookup.get(name)
+        label    = name + (" (" + lib_meta["desc"] + ")" if lib_meta else "")
+        version_str = version if version else "unknown"
+        cols = st.columns([2, 1, 1, 2])
+        cols[0].markdown(label)
+        cols[1].markdown("Connected" if ok else "Failed")
+        cols[2].markdown(str(n_tools) if ok else "-")
+        cols[3].markdown("`" + version_str + "`" if ok else (error or "-")[:60])
+
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg["role"] == "assistant" and "cost" in msg:
+            st.caption(
+                "This response: $" + "{:.6f}".format(msg["cost"])
+                + "  |  in: " + str(msg["input_tokens"]) + " tokens"
+                + "  out: " + str(msg["output_tokens"]) + " tokens"
+            )
 
-if prompt := st.chat_input("How do I..."):
+shown = list(mcp_config.keys())[:4]
+suffix = "..." if len(mcp_config) > 4 else ""
+placeholder = "Ask about " + ", ".join(shown) + suffix
+
+if prompt := st.chat_input(placeholder):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-
     with st.chat_message("assistant"):
-        with st.status("Thinking...") as status:
-            response, in_t, out_t = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
-            st.markdown(response)
-            st.session_state.total_input_tokens += in_t
-            st.session_state.total_output_tokens += out_t
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            status.update(label="Response Ready", state="complete")
+        with st.status("Starting...", expanded=True) as status:
+            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
+        st.markdown(answer)
+        msg_cost = calc_cost(in_tok, out_tok)
+        st.caption(
+            "This response: $" + "{:.6f}".format(msg_cost)
+            + "  |  in: " + str(in_tok) + " tokens"
+            + "  out: " + str(out_tok) + " tokens"
+        )
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": answer,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "cost": msg_cost,
+        })
+        st.session_state.total_input_tokens  += in_tok
+        st.session_state.total_output_tokens += out_tok
+        st.rerun()
