@@ -1,20 +1,12 @@
 import streamlit as st
 import asyncio
 import anthropic
-import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from contextlib import AsyncExitStack
 import re
 import json
 from datetime import datetime
-
-
-def unwrap_exc(e):
-    """Return a readable message, unwrapping BaseExceptionGroup if needed."""
-    if hasattr(e, "exceptions") and e.exceptions:
-        return "; ".join(unwrap_exc(sub) for sub in e.exceptions)
-    return str(e)
 
 try:
     ANTHROPIC_KEY = st.secrets["ANTHROPIC_API_KEY"]
@@ -23,6 +15,15 @@ except KeyError:
     st.stop()
 
 GITMCP_BASE = "https://gitmcp.io/"
+
+# Supabase MCP server (stored in Streamlit secrets)
+try:
+    SUPABASE_MCP_URL   = st.secrets["SUPABASE_MCP_URL"]
+    SUPABASE_MCP_TOKEN = st.secrets["SUPABASE_MCP_TOKEN"]
+except KeyError:
+    SUPABASE_MCP_URL   = None
+    SUPABASE_MCP_TOKEN = None
+
 MAX_ACTIVE_SERVERS = 2
 
 INPUT_COST_PER_M  = 1.00
@@ -52,9 +53,11 @@ LIBRARY_CATALOGUE = [
     {"shortname": "caret",                      "github": "topepo/caret",                  "lang": "R",      "desc": "ML training & tuning",                         "default": False},
     {"shortname": "tidymodels",                 "github": "tidymodels/tidymodels",         "lang": "R",      "desc": "Tidy modelling framework",                     "default": False},
     {"shortname": "data.table",                 "github": "Rdatatable/data.table",         "lang": "R",      "desc": "Fast in-memory data wrangling",               "default": False},
+    # Supabase MCP servers
+    {"shortname": "hds_dataset_summary",        "github": None,                              "lang": "Supabase", "desc": "HDS dataset summary (Supabase MCP)",          "default": True},
 ]
 
-LANG_LABEL = {"Python": "Python", "R": "R"}
+LANG_LABEL = {"Python": "Python", "R": "R", "Supabase": "Supabase"}
 
 EXAMPLE_QUERY = (
     "Using the pandas docs, generate code to group by a disease column "
@@ -63,6 +66,8 @@ EXAMPLE_QUERY = (
 
 
 def gitmcp_url(github):
+    if github is None:
+        return ""
     return GITMCP_BASE + github
 
 
@@ -106,8 +111,6 @@ if "active_shortnames" not in st.session_state:
     }
 if "custom_servers" not in st.session_state:
     st.session_state.custom_servers = []
-if "custom_mcp_servers" not in st.session_state:
-    st.session_state.custom_mcp_servers = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "connection_status" not in st.session_state:
@@ -118,170 +121,127 @@ if "total_output_tokens" not in st.session_state:
     st.session_state.total_output_tokens = 0
 
 
-async def probe_servers(mcp_config, mcp_headers=None):
-    if mcp_headers is None:
-        mcp_headers = {}
+async def probe_servers(mcp_config):
     results = {}
-    try:
-        async with AsyncExitStack() as stack:
-            for name, url in mcp_config.items():
-                try:
-                    headers = mcp_headers.get(name)
-                    http_client = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=headers)
-                    ) if headers else None
-                    read, write, _ = await stack.enter_async_context(
-                        streamable_http_client(url, http_client=http_client)
-                    )
-                    session = await stack.enter_async_context(ClientSession(read, write))
-                    await session.initialize()
-                    tool_list = await session.list_tools()
-                    tools = tool_list.tools
-                    version = None
-                    for t in tools:
-                        version = extract_version_from_description(t.description or "")
-                        if version:
-                            break
-                    results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
-                except Exception as e:
-                    results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
-        for name in mcp_config:
-            if name not in results:
-                results[name] = {"ok": False, "tools": 0, "version": None, "error": unwrap_exc(e)}
+    async with AsyncExitStack() as stack:
+        for name, url in mcp_config.items():
+            try:
+                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                tool_list = await session.list_tools()
+                tools = tool_list.tools
+                version = None
+                for t in tools:
+                    version = extract_version_from_description(t.description or "")
+                    if version:
+                        break
+                results[name] = {"ok": True, "tools": len(tools), "version": version, "error": None}
+            except Exception as e:
+                results[name] = {"ok": False, "tools": 0, "version": None, "error": str(e)}
     return results
 
 
-async def run_conversation(user_query, mcp_config, status, mcp_headers=None):
-    if mcp_headers is None:
-        mcp_headers = {}
+async def run_conversation(user_query, mcp_config, status):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     tool_registry = {}
     anthropic_tools = []
     input_tokens  = 0
     output_tokens = 0
 
-    result_holder = [None]
-    try:
-        async with AsyncExitStack() as stack:
-            for name, url in mcp_config.items():
-                status.update(label="Connecting to " + name + "...")
-                try:
-                    headers = mcp_headers.get(name)
-                    http_client = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=headers)
-                    ) if headers else None
-                    read, write, _ = await stack.enter_async_context(
-                        streamable_http_client(url, http_client=http_client)
-                    )
-                    session = await stack.enter_async_context(ClientSession(read, write))
-                    await session.initialize()
-                    result = await session.list_tools()
-                    for t in result.tools:
-                        prefixed = name + "_" + t.name
-                        tool_registry[prefixed] = (session, t.name)
-                        anthropic_tools.append({
-                            "name": prefixed,
-                            "description": t.description or "",
-                            "input_schema": t.inputSchema,
-                        })
-                    status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
-                except Exception as e:
-                    status.write("Unreachable: " + name + " - " + unwrap_exc(e))
+    async with AsyncExitStack() as stack:
+        for name, url in mcp_config.items():
+            status.update(label="Connecting to " + name + "...")
+            try:
+                read, write, _ = await stack.enter_async_context(streamable_http_client(url))
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                result = await session.list_tools()
+                for t in result.tools:
+                    prefixed = name + "_" + t.name
+                    tool_registry[prefixed] = (session, t.name)
+                    anthropic_tools.append({
+                        "name": prefixed,
+                        "description": t.description or "",
+                        "input_schema": t.inputSchema,
+                    })
+                status.write("Connected: " + name + " (" + str(len(result.tools)) + " tools)")
+            except Exception as e:
+                status.write("Unreachable: " + name + " - " + str(e))
 
-            if not tool_registry:
-                return "No MCP servers could be reached.", 0, 0
+        if not tool_registry:
+            return "No MCP servers could be reached.", 0, 0
 
-            status.write("Tools available: " + ", ".join(tool_registry.keys()))
-            messages = [{"role": "user", "content": user_query}]
-            turn = 0
+        status.write("Tools available: " + ", ".join(tool_registry.keys()))
+        messages = [{"role": "user", "content": user_query}]
+        turn = 0
 
-            while True:
-                turn += 1
-                status.update(label="Thinking... (turn " + str(turn) + ")")
-                try:
-                    response = client.messages.create(
-                        model="claude-haiku-4-5",
-                        max_tokens=4096,
-                        tools=anthropic_tools,
-                        messages=messages,
-                    )
-                except anthropic.RateLimitError:
-                    status.update(label="Rate limit hit", state="error", expanded=False)
-                    result_holder[0] = (
-                        "Rate limit reached. You have exceeded the API quota for this minute. "
-                        "Please wait 60 seconds and try again. If this keeps happening, "
-                        "try reducing the number of active servers or shortening your query.",
-                        input_tokens, output_tokens,
-                    )
-                    break
+        while True:
+            turn += 1
+            status.update(label="Thinking... (turn " + str(turn) + ")")
+            try:
+                response = client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=4096,
+                    tools=anthropic_tools,
+                    messages=messages,
+                )
+            except anthropic.RateLimitError:
+                status.update(label="Rate limit hit", state="error", expanded=False)
+                return (
+                    "Rate limit reached. You have exceeded the API quota for this minute. "
+                    "Please wait 60 seconds and try again. If this keeps happening, "
+                    "try reducing the number of active servers or shortening your query."
+                ), input_tokens, output_tokens
 
-                input_tokens  += response.usage.input_tokens
-                output_tokens += response.usage.output_tokens
-                text_parts = [b.text for b in response.content if b.type == "text"]
+            input_tokens  += response.usage.input_tokens
+            output_tokens += response.usage.output_tokens
+            text_parts = [b.text for b in response.content if b.type == "text"]
 
-                if response.stop_reason == "end_turn":
-                    status.update(label="Done", state="complete", expanded=False)
-                    result_holder[0] = (
-                        "\n".join(text_parts) if text_parts else "(no response)",
-                        input_tokens, output_tokens,
-                    )
-                    break
+            if response.stop_reason == "end_turn":
+                status.update(label="Done", state="complete", expanded=False)
+                return "\n".join(text_parts) if text_parts else "(no response)", input_tokens, output_tokens
 
-                if response.stop_reason == "tool_use":
-                    messages.append({"role": "assistant", "content": response.content})
-                    if text_parts:
-                        status.write("Reasoning: " + " ".join(text_parts))
-                    tool_results = []
-                    for block in response.content:
-                        if block.type != "tool_use":
-                            continue
-                        status.update(label="Calling " + block.name + "...")
-                        with status.container():
-                            with st.expander("Tool: " + block.name, expanded=False):
-                                st.json(block.input)
-                        if block.name not in tool_registry:
-                            result_text = "Unknown tool: " + block.name
-                        else:
-                            session, orig_name = tool_registry[block.name]
-                            try:
-                                call_result = await session.call_tool(orig_name, block.input)
-                                result_text = "\n".join(
-                                    c.text for c in call_result.content if hasattr(c, "text")
-                                ) or "(empty result)"
-                                preview = result_text[:300] + "..." if len(result_text) > 300 else result_text
-                                status.write(block.name + " returned: " + preview)
-                            except Exception as e:
-                                result_text = "Tool error: " + str(e)
-                                status.write(block.name + " error: " + str(e))
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_text,
-                        })
-                    messages.append({"role": "user", "content": tool_results})
-                else:
-                    status.update(label="Unexpected stop: " + response.stop_reason, state="error")
-                    result_holder[0] = (
-                        "\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason,
-                        input_tokens, output_tokens,
-                    )
-                    break
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
-        if result_holder[0] is None:
-            status.update(label="Connection error", state="error", expanded=False)
-            result_holder[0] = ("MCP connection error: " + unwrap_exc(e), input_tokens, output_tokens)
-
-    return result_holder[0] if result_holder[0] is not None else ("(no response)", input_tokens, output_tokens)
+            if response.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": response.content})
+                if text_parts:
+                    status.write("Reasoning: " + " ".join(text_parts))
+                tool_results = []
+                for block in response.content:
+                    if block.type != "tool_use":
+                        continue
+                    status.update(label="Calling " + block.name + "...")
+                    with status.container():
+                        with st.expander("Tool: " + block.name, expanded=False):
+                            st.json(block.input)
+                    if block.name not in tool_registry:
+                        result_text = "Unknown tool: " + block.name
+                    else:
+                        session, orig_name = tool_registry[block.name]
+                        try:
+                            call_result = await session.call_tool(orig_name, block.input)
+                            result_text = "\n".join(
+                                c.text for c in call_result.content if hasattr(c, "text")
+                            ) or "(empty result)"
+                            preview = result_text[:300] + "..." if len(result_text) > 300 else result_text
+                            status.write(block.name + " returned: " + preview)
+                        except Exception as e:
+                            result_text = "Tool error: " + str(e)
+                            status.write(block.name + " error: " + str(e))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                status.update(label="Unexpected stop: " + response.stop_reason, state="error")
+                return ("\n".join(text_parts) if text_parts else "Stopped: " + response.stop_reason), input_tokens, output_tokens
 
 
-st.set_page_config(page_title="MCP Doc Assistant", layout="wide")
-st.title("MCP Doc Assistant")
-st.caption("Query GitHub-hosted documentation via gitmcp.io, or connect any custom HTTP MCP server.")
+st.set_page_config(page_title="GitMCP Doc Assistant", layout="wide")
+st.title("GitMCP Doc Assistant")
+st.caption("Query GitHub-hosted documentation via gitmcp.io. Only gitmcp.io servers are permitted.")
 st.info("Note: this app is single-turn. Each message is sent independently with no memory of previous messages. Clear chat history before starting a new topic for best results.")
 
 with st.sidebar:
@@ -306,9 +266,17 @@ with st.sidebar:
             col = cols[idx % 2]
             is_active = lib["shortname"] in st.session_state.active_shortnames
             # Disable unchecked boxes when at the limit
-            disabled = at_limit and not is_active
-            help_text = lib["desc"] + "\n\n" + gitmcp_url(lib["github"])
-            if disabled:
+            supabase_missing = (lib.get("lang") == "Supabase"
+                                and lib["shortname"] == "hds_dataset_summary"
+                                and not SUPABASE_MCP_URL)
+            disabled = (at_limit and not is_active) or supabase_missing
+            if lib["github"]:
+                help_text = lib["desc"] + "\n\n" + gitmcp_url(lib["github"])
+            else:
+                help_text = lib["desc"]
+                if supabase_missing:
+                    help_text += " (set SUPABASE_MCP_URL and SUPABASE_MCP_TOKEN in secrets)"
+            if disabled and not supabase_missing:
                 help_text = "Deselect another server first (max " + str(MAX_ACTIVE_SERVERS) + " active)"
             checked = col.checkbox(
                 lib["shortname"],
@@ -351,38 +319,36 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.subheader("Custom MCP server")
-    st.caption("Connect any HTTP/HTTPS MCP server (e.g. Supabase, custom APIs).")
-
-    custom_mcp_to_keep = []
-    for i, cs in enumerate(st.session_state.custom_mcp_servers):
-        c1, c2, c3 = st.columns([2, 5, 1])
-        new_name  = c1.text_input("Name",  value=cs["shortname"],      key="mcpname_"  + str(i),
-                                   label_visibility="collapsed", placeholder="shortname")
-        new_url   = c2.text_input("URL",   value=cs["url"],            key="mcpurl_"   + str(i),
-                                   label_visibility="collapsed", placeholder="https://...")
-        remove = c3.button("X", key="mcpdel_" + str(i))
-        new_token = st.text_input("Bearer token (optional)", value=cs.get("token", ""),
-                                   key="mcptoken_" + str(i), type="password",
-                                   placeholder="Leave blank if no auth required")
-        if not remove:
-            custom_mcp_to_keep.append({"shortname": new_name, "url": new_url, "token": new_token})
-    st.session_state.custom_mcp_servers = custom_mcp_to_keep
-
-    if st.button("Add custom MCP"):
-        st.session_state.custom_mcp_servers.append({"shortname": "", "url": "", "token": ""})
-        st.rerun()
-
-    st.divider()
     errors = []
     mcp_config = {}
-    mcp_headers = {}
     seen_names = set()
 
     for lib in LIBRARY_CATALOGUE:
-        if lib["shortname"] in st.session_state.active_shortnames:
-            mcp_config[lib["shortname"]] = gitmcp_url(lib["github"])
-            seen_names.add(lib["shortname"])
+        if lib["shortname"] not in st.session_state.active_shortnames:
+            continue
+        if lib["github"] is None:
+            # Supabase / non-gitmcp entries handled below
+            continue
+        mcp_config[lib["shortname"]] = gitmcp_url(lib["github"])
+        seen_names.add(lib["shortname"])
+
+    # Wire Supabase catalogue entries to their secret URLs
+    supabase_map = {
+        "hds_dataset_summary": (SUPABASE_MCP_URL, SUPABASE_MCP_TOKEN),
+    }
+    for lib in LIBRARY_CATALOGUE:
+        if lib.get("lang") != "Supabase":
+            continue
+        if lib["shortname"] not in st.session_state.active_shortnames:
+            continue
+        url, token = supabase_map.get(lib["shortname"], (None, None))
+        if not url:
+            errors.append(lib["shortname"] + ": SUPABASE_MCP_URL not set in Streamlit secrets.")
+            continue
+        mcp_config[lib["shortname"]] = url
+        seen_names.add(lib["shortname"])
+        if token:
+            mcp_headers[lib["shortname"]] = {"Authorization": "Bearer " + token}
 
     for cs in st.session_state.custom_servers:
         name = cs["shortname"].strip()
@@ -404,29 +370,6 @@ with st.sidebar:
             continue
         seen_names.add(name)
         mcp_config[name] = resolved
-
-    for cs in st.session_state.custom_mcp_servers:
-        name = cs["shortname"].strip()
-        url  = cs["url"].strip()
-        if not name and not url:
-            continue
-        if not name:
-            errors.append("A custom MCP server is missing a short name.")
-            continue
-        if not re.match(r"^[A-Za-z0-9_]+$", name):
-            errors.append(name + ": use only letters, digits, underscores.")
-            continue
-        if name in seen_names:
-            errors.append("Duplicate short name: " + name)
-            continue
-        if not url.startswith("https://"):
-            errors.append(name + ": URL must start with https://")
-            continue
-        seen_names.add(name)
-        mcp_config[name] = url
-        token = cs.get("token", "").strip()
-        if token:
-            mcp_headers[name] = {"Authorization": "Bearer " + token}
 
     for e in errors:
         st.warning(e)
@@ -480,10 +423,10 @@ if not mcp_config:
     st.warning("Select at least one library from the sidebar to start chatting.")
     st.stop()
 
-prev_config_key = str(sorted(mcp_config.items())) + str(sorted(mcp_headers.items()))
+prev_config_key = str(sorted(mcp_config.items()))
 if st.session_state.connection_status.get("_config_key") != prev_config_key:
     with st.status("Probing servers...", expanded=True) as probe_status:
-        probe_results = asyncio.run(probe_servers(mcp_config, mcp_headers))
+        probe_results = asyncio.run(probe_servers(mcp_config))
         st.session_state.connection_status = probe_results
         st.session_state.connection_status["_config_key"] = prev_config_key
         probe_status.update(label="Server probe complete", state="complete", expanded=False)
@@ -534,7 +477,7 @@ if prompt := st.chat_input(placeholder):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.status("Starting...", expanded=True) as status:
-            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status, mcp_headers))
+            answer, in_tok, out_tok = asyncio.run(run_conversation(prompt, mcp_config, status))
         st.markdown(answer)
         msg_cost = calc_cost(in_tok, out_tok)
         st.caption(
