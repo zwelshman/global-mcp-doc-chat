@@ -321,6 +321,7 @@ with st.sidebar:
     st.divider()
     errors = []
     mcp_config = {}
+    mcp_headers = {}
     seen_names = set()
 
     for lib in LIBRARY_CATALOGUE:
